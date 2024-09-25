@@ -3,7 +3,6 @@ import socket, os
 from tqdm import tqdm
 import numpy as np
 from transformers import pipeline
-from datasets import Dataset
 
 global PATH
 PATH = "/home/tivwesem/Documents/article_data_pipeline/03_topics/"
@@ -75,7 +74,7 @@ def get_processed_text(path):
     processed = []
     with open(path+".txt", 'r') as f:
         for line in f:
-            processed.append(line.strip().replace("\\", "\\\\"))
+            processed.append(line.strip().replace("NEWLINEXGHQ754","\n"))
             processed[-1]
     return processed
 

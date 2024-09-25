@@ -49,5 +49,5 @@ covid_comments.processed = clean_markdown.(covid_comments.body)
 SQLite.load!(covid_submissions, output_db, "submission")
 SQLite.load!(covid_comments, output_db, "comment")
 
-writedlm(joinpath(scratch_dir, "submission.txt"), replace(covid_submissions.processed, "\\"=>"\\\\"), '\n')
-writedlm(joinpath(scratch_dir, "comment.txt"), replace(covid_comments.processed, "\\"=>"\\\\"), '\n')
+writedlm(joinpath(scratch_dir, "submission.txt"), replace(covid_submissions.processed, '\n'=>"NEWLINEXGHQ754"), '\n')
+writedlm(joinpath(scratch_dir, "comment.txt"), replace(covid_comments.processed, '\n'=>"NEWLINEXGHQ754"), '\n')
