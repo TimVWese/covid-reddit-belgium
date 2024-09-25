@@ -2,3 +2,4 @@
 *.txt
 *.pbs
 Manifest.toml
+.venv

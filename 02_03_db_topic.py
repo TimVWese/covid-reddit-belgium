@@ -2,9 +2,11 @@ import socket, os
 
 from tqdm import tqdm
 import numpy as np
+from transformers import pipeline
+from datasets import Dataset
 
 global PATH
-PATH = "/data/gent/vo/000/gvo00048/vsc44634/reddit/article_data_pipeline/03_topics/"
+PATH = "/home/tivwesem/Documents/article_data_pipeline/03_topics/"
 
 global DTAI_TOPICS
 DTAI_TOPICS = ["vaccine", "masks", "lockdown", "schools", "quarantine", "closing-horeca", "testing", "curfew", "other-measure", "not-applicable"]
@@ -18,7 +20,6 @@ class Classifier:
     dtai_label_to_idx = {topic: idx for idx, topic in enumerate(DTAI_TOPICS)}
 
     def __init__(self, n_docs, device=-1):
-        from transformers import pipeline
 
         print("Loading mbert on device ", device)
         mbert_pipe = pipeline("text-classification", model="DTAI-KULeuven/mbert-corona-tweets-belgium-topics", device=device)
@@ -38,7 +39,7 @@ class Classifier:
                 documents[i] = documents[i][:512]
             if len(documents[i]) <= 3:
                 documents[i] = "other"
- 
+
         self.unpack_dtai(self.classifiers["mbert"](documents), rows)
 
         return
@@ -81,7 +82,7 @@ def get_processed_text(path):
 def add_transformers_models(path, device=-1,
                             tables=["comment", "submission"],
                             start_point=0, end_point=None,
-                            batch_size=10, commit_every=100, back_up_every=5000):
+                            batch_size=1000, commit_every=50, back_up_every=250):
     for table in tables:
         docs = get_processed_text(path+table)
         classifier = Classifier(len(docs), device=device)
@@ -118,10 +119,9 @@ def main_structured_topics():
     tables = ["comment", "submission"]
     start_point = 0
     end_point = None
-    hostname = socket.gethostname()
-    device = 0 if "joltik" in hostname or "accelgor" in hostname else -1
+    device = 0
 
     add_transformers_models(path, device=device, tables=tables, start_point=start_point, end_point=end_point)
     return
 
-main_structured_topics()
+#main_structured_topics()
