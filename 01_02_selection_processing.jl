@@ -46,8 +46,12 @@ end
 covid_submissions.processed = [clean_markdown(covid_submissions[i,:title]*"\n\n"*covid_submissions[i,:selftext]) for i in 1:nrow(covid_submissions)]
 covid_comments.processed = clean_markdown.(covid_comments.body)
 
+DBInterface.execute(output_db, "DROP TABLE IF EXISTS submission")
 SQLite.load!(covid_submissions, output_db, "submission")
+DBInterface.execute(output_db, "DROP TABLE IF EXISTS comment")
 SQLite.load!(covid_comments, output_db, "comment")
 
-writedlm(joinpath(scratch_dir, "submission.txt"), replace(covid_submissions.processed, '\n'=>"NEWLINEXGHQ754"), '\n')
-writedlm(joinpath(scratch_dir, "comment.txt"), replace(covid_comments.processed, '\n'=>"NEWLINEXGHQ754"), '\n')
+repl_nl = x -> replace(x, "\n"=>"\\n")
+
+writedlm(joinpath(scratch_dir, "submission.txt"), repl_nl.(covid_submissions.processed), '\n')
+writedlm(joinpath(scratch_dir, "comment.txt"), repl_nl.(covid_comments.processed), '\n')

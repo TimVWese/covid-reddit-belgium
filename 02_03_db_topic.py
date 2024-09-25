@@ -74,7 +74,7 @@ def get_processed_text(path):
     processed = []
     with open(path+".txt", 'r') as f:
         for line in f:
-            processed.append(line.strip().replace("NEWLINEXGHQ754","\n"))
+            processed.append(line.strip().replace("\\n","\n"))
             processed[-1]
     return processed
 

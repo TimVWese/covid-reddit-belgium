@@ -6,7 +6,7 @@ DTAI_TOPICS = ["vaccine", "masks", "lockdown", "schools", "quarantine", "closing
 
 topic_path = "03_topics/"
 input_db = SQLite.DB("02_reddit_belgium.db")
-output_db = SQLite.DB("03_belgium_topics.db")
+output_db = SQLite.DB("04_belgium_topics.db")
 
 comments = DataFrame(DBInterface.execute(input_db, "SELECT * FROM comment"))
 submissions = DataFrame(DBInterface.execute(input_db, "SELECT * FROM submission"))
