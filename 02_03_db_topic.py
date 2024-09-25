@@ -2,6 +2,7 @@ import socket, os
 
 from tqdm import tqdm
 import numpy as np
+from transformers import pipeline
 
 global PATH
 PATH = "/data/gent/vo/000/gvo00048/vsc44634/reddit/article_data_pipeline/03_topics/"
@@ -18,7 +19,6 @@ class Classifier:
     dtai_label_to_idx = {topic: idx for idx, topic in enumerate(DTAI_TOPICS)}
 
     def __init__(self, n_docs, device=-1):
-        from transformers import pipeline
 
         print("Loading mbert on device ", device)
         mbert_pipe = pipeline("text-classification", model="DTAI-KULeuven/mbert-corona-tweets-belgium-topics", device=device)
@@ -74,7 +74,7 @@ def get_processed_text(path):
     processed = []
     with open(path+".txt", 'r') as f:
         for line in f:
-            processed.append(line.strip().replace("\\", "\\\\"))
+            processed.append(line.strip().replace("NEWLINEXGHQ754","\n"))
             processed[-1]
     return processed
 
