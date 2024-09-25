@@ -20,24 +20,22 @@ end
 
 function get_topic(row, columns)
     scores = row[columns][:]
-    idx = argmax(scores)
-    return columns[idx]
+    return argmax(scores)
 end
 
 function handle(df, columns, file)
     topics = unpack_npz(file, df.id, columns)
-    innerjoin!(df, topics, on=:id)
-    df.add_topic = get_topic.(eachrow(df))
+    df = innerjoin(df, topics, on=:id)
+    df.topic = [get_topic(row, columns) for row in eachrow(df)]
     return df
 end
 
-function store(output_path, comments, submissions)
-    target = SQLite.DB(output_path)
-    DBInterface.execute(target, "DROP TABLE IF EXISTS comment")
-    DBInterface.execute(target, "DROP TABLE IF EXISTS submission")
+function store(output_db, comments, submissions)
+    DBInterface.execute(output_db, "DROP TABLE IF EXISTS comment")
+    DBInterface.execute(output_db, "DROP TABLE IF EXISTS submission")
 
-    SQLite.load!(comments, target, "comment")
-    SQLite.load!(submissions, target, "submission")
+    SQLite.load!(comments, output_db, "comment")
+    SQLite.load!(submissions, output_db, "submission")
 end
 
 function get_random_topic(df, models=("mbert", "deberta", "bart"))
@@ -64,10 +62,10 @@ end
 # Combine the results of the hugging face models
 ################################################
 file = joinpath(topic_path, "submission_final_mbert.npy")
-submissions = handle(submissions, DTAI_TOPICS, file)
+sub_wt = handle(submissions, DTAI_TOPICS, file)
 
 file = joinpath(topic_path, "comment_final_mbert.npy")
-comments = handle(comments, DTAI_TOPICS, file)
+com_wt = handle(comments, DTAI_TOPICS, file)
 
 
 ##########################
@@ -75,35 +73,24 @@ comments = handle(comments, DTAI_TOPICS, file)
 ##########################
 using Statistics
 
-submission_threshold = 0.1
-comment_threshold = 0.2
-
+disallowed = (:notapplicable,)
+comment_threshold = 0.9
 
 allowed_sumbmissions = Set([
-    row.id for row in eachrow(submissions) if row.mbert_notapplicable < submission_threshold
+    row.id for row in eachrow(sub_wt) if !(row.topic in disallowed) 
 ])
 
-comments = comments[[length(split(row.processed, " ")) > 3 for row in eachrow(comments)], :]
 using Statistics
-comment_mean = combine(groupby(comments, :submission_id), :mbert_notapplicable => mean)
-comment_mean = comment_mean[ismissing.(comment_mean.submission_id).==false, :]
+# using Plots
+prop_na = x -> count(in(disallowed), x) / length(x)
+com_prop = combine(groupby(com_wt, :submission_id), :topic=>prop_na)
+# histogram(com_prop.topic_function, bins=100, title="Distribution of notapplicable mean scores")
+com_prop = com_prop[.!ismissing.(com_prop.submission_id), :]
 union!(allowed_sumbmissions, Set([
-    row.submission_id for row in eachrow(comment_mean) if row.mbert_notapplicable_mean < comment_threshold
+    row.submission_id for row in eachrow(com_prop) if row.topic_function <= comment_threshold
 ]))
 
-submission_selection = submissions[[row.id in allowed_sumbmissions for row in eachrow(submissions)], :]
-comment_selection = comments[[row.submission_id in allowed_sumbmissions for row in eachrow(comments)], :]
+submission_selection = sub_wt[[row.id in allowed_sumbmissions for row in eachrow(sub_wt)], :]
+comment_selection = com_wt[[row.submission_id in allowed_sumbmissions for row in eachrow(com_wt)], :]
 
-output_path = topic_path * "belgium_covid_very_strict.db"
-store(output_path, comment_selection, submission_selection)
-
-
-#####################
-# Check some topics
-#####################
-
-get_random_topic(submissions)
-get_random_topic(comments)
-
-get_random_topic(comment_selection)
-get_random_topic(submission_selection)
+store(output_db, comment_selection, submission_selection)

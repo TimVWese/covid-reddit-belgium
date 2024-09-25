@@ -1,5 +1,5 @@
 import socket, os
-
+import sqlite3
 from tqdm import tqdm
 import numpy as np
 from transformers import pipeline
@@ -70,12 +70,11 @@ class Classifier:
         return start_point + minv
 
 
-def get_processed_text(path):
-    processed = []
-    with open(path+".txt", 'r') as f:
-        for line in f:
-            processed.append(line.strip().replace("\\n","\n"))
-            processed[-1]
+def get_processed_text(table):
+    conn = sqlite3.connect('02_reddit_belgium.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT processed FROM " + table)
+    processed = [row[0] for row in cursor.fetchall()]
     return processed
 
 def add_transformers_models(path, device=-1,
@@ -83,7 +82,7 @@ def add_transformers_models(path, device=-1,
                             start_point=0, end_point=None,
                             batch_size=1000, commit_every=50, back_up_every=250):
     for table in tables:
-        docs = get_processed_text(path+table)
+        docs = get_processed_text(table)
         classifier = Classifier(len(docs), device=device)
         finished = False
         classifier.load(path+table)
@@ -123,4 +122,4 @@ def main_structured_topics():
     add_transformers_models(path, device=device, tables=tables, start_point=start_point, end_point=end_point)
     return
 
-#main_structured_topics()
+main_structured_topics()

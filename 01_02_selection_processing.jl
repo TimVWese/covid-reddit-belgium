@@ -2,7 +2,9 @@ using SQLite
 using DataFrames
 using DelimitedFiles
 
-input_db = SQLite.DB("01_b1b2_sentiment.db")
+#! First step would be to add submission id!!!
+
+input_db = SQLite.DB("01_b1b2.db")
 output_db = SQLite.DB("02_reddit_belgium.db")
 scratch_dir = "03_topics/"
 

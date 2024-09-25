@@ -3,5 +3,6 @@
 *.pbs
 *.pbs*
 *.npy
+*.log
 Manifest.toml
 .venv
