@@ -1,4 +1,6 @@
 *.db
 *.txt
 *.pbs
+*.pbs*
+*.npy
 Manifest.toml
