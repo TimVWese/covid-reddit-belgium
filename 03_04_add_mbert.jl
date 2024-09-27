@@ -12,7 +12,7 @@ comments = DataFrame(DBInterface.execute(input_db, "SELECT * FROM comment"))
 submissions = DataFrame(DBInterface.execute(input_db, "SELECT * FROM submission"))
 
 function unpack_npz(file, ids, columns)
-    data = npzread(file)
+    data = Float64.(npzread(file))
     df = DataFrame(data, columns)
     df.id = ids
     return df
