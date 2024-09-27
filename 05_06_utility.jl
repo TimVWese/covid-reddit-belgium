@@ -43,7 +43,7 @@ function discard_short_results!(df; threshold=3)
     allowmissing!(df, topic_cols)
     allowmissing!(df, sentiment_cols)
     for row in eachrow(df)
-        if length(split(row.processed, " ")) <= threshold
+        if length(split(row.processed, " ")) <= threshold || row.processed in ("[deleted]", "[removed]")
             row.topic = notapplicable
             map(x -> row[x] = missing, topic_cols)
             map(x -> row[x] = missing, sentiment_cols)
@@ -152,10 +152,7 @@ handle_df!(submissions)
 
 add_depth!(comments)
 
-to_cascade = deepcopy(comments)
-cascade_topics!(to_cascade, submissions);
-countmap(comments.topic)
-countmap(to_cascade.topic)
+cascade_topics!(comments, submissions)
 
-SQLite.load!(to_cascade, output_db, "comment")
+SQLite.load!(comments, output_db, "comment")
 SQLite.load!(submissions, output_db, "submission")
