@@ -4,5 +4,6 @@
 *.pbs*
 *.npy
 *.log
+*.zst
 Manifest.toml
 .venv
