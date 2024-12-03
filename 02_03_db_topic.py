@@ -4,8 +4,8 @@ from tqdm import tqdm
 import numpy as np
 from transformers import pipeline
 
-global PATH
-PATH = "/home/tivwesem/Documents/article_data_pipeline/03_topics/"
+db_path = "02_belgium.db"
+output_path = "03_topics/"
 
 global DTAI_TOPICS
 DTAI_TOPICS = ["vaccine", "masks", "lockdown", "schools", "quarantine", "closing-horeca", "testing", "curfew", "other-measure", "not-applicable"]
@@ -65,33 +65,32 @@ class Classifier:
             return indices[0][0] if indices[0].size > 0 else len(sums)
 
         minv = find_index(self.results_mbert[start_point:,:])
-            
 
         return start_point + minv
 
 
-def get_processed_text(table):
-    conn = sqlite3.connect('02_reddit_belgium.db')
+def get_processed_text(table, db_path):
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor.execute("SELECT processed FROM " + table)
     processed = [row[0] for row in cursor.fetchall()]
     return processed
 
-def add_transformers_models(path, device=-1,
+def add_transformers_models(db_path, output_path , device=-1,
                             tables=["comment", "submission"],
                             start_point=0, end_point=None,
                             batch_size=1000, commit_every=50, back_up_every=250):
     for table in tables:
-        docs = get_processed_text(table)
+        docs = get_processed_text(table, db_path)
         classifier = Classifier(len(docs), device=device)
         finished = False
-        classifier.load(path+table)
+        classifier.load(output_path+table)
         handled = classifier.find_next_row(start_point=start_point)
         end_point = len(docs) if end_point is None else min(end_point, len(docs))
         progress = tqdm(total=end_point)
         progress.update(handled)
         count = 0
-        
+
         while not finished:
             batch_end = handled + batch_size
             if batch_end >= end_point:
@@ -105,21 +104,20 @@ def add_transformers_models(path, device=-1,
 
             count += 1
             if count % commit_every == 0:
-                classifier.store(path+"_"+table)
+                classifier.store(output_path+"_"+table)
             if count % back_up_every == 0:
-                classifier.store(path+"_"+table+"_"+str(handled))
+                classifier.store(output_path+"_"+table+"_"+str(handled))
 
-        classifier.store(path+"_"+table+"_final")
+        classifier.store(output_path+table+"_final")
     return
 
-def main_structured_topics():
-    path = PATH
+def main_structured_topics(db_path, output_path):
     tables = ["comment", "submission"]
     start_point = 0
     end_point = None
     device = 0
 
-    add_transformers_models(path, device=device, tables=tables, start_point=start_point, end_point=end_point)
+    add_transformers_models(db_path, output_path, device=device, tables=tables, start_point=start_point, end_point=end_point)
     return
 
-main_structured_topics()
+main_structured_topics(db_path, output_path)

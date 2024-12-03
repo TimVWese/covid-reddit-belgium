@@ -5,8 +5,8 @@ using NPZ
 DTAI_TOPICS = ["vaccine", "masks", "lockdown", "schools", "quarantine", "closinghoreca", "testing", "curfew", "othermeasure", "notapplicable"]
 
 topic_path = "03_topics/"
-input_db = SQLite.DB("02_reddit_belgium.db")
-output_db = SQLite.DB("04_belgium_topics.db")
+input_db = SQLite.DB("02_belgium.db")
+output_db = SQLite.DB("04_belgium.db")
 
 comments = DataFrame(DBInterface.execute(input_db, "SELECT * FROM comment"))
 submissions = DataFrame(DBInterface.execute(input_db, "SELECT * FROM submission"))
@@ -38,26 +38,6 @@ function store(output_db, comments, submissions)
     SQLite.load!(submissions, output_db, "submission")
 end
 
-function get_random_topic(df, models=("mbert", "deberta", "bart"))
-    result = Dict()
-    row = rand(1:size(df, 1))
-    result["processed"] = df.processed[row]
-    for model in models
-        labels = []
-        scores = []
-        for col in names(df)
-            if occursin(model, col)
-                push!(labels, col)
-                push!(scores, df[row, col])
-            end
-        end
-        idx = argmax(scores)
-        result[model] = (labels[idx], scores[idx])
-    end
-    return result
-end
-
-
 ################################################
 # Combine the results of the hugging face models
 ################################################
@@ -77,14 +57,11 @@ disallowed = (:notapplicable,)
 comment_threshold = 0.9
 
 allowed_sumbmissions = Set([
-    row.id for row in eachrow(sub_wt) if !(row.topic in disallowed) 
+    row.id for row in eachrow(sub_wt) if !(row.topic in disallowed)
 ])
 
-using Statistics
-# using Plots
 prop_na = x -> count(in(disallowed), x) / length(x)
 com_prop = combine(groupby(com_wt, :submission_id), :topic=>prop_na)
-# histogram(com_prop.topic_function, bins=100, title="Distribution of notapplicable mean scores")
 com_prop = com_prop[.!ismissing.(com_prop.submission_id), :]
 union!(allowed_sumbmissions, Set([
     row.submission_id for row in eachrow(com_prop) if row.topic_function <= comment_threshold
@@ -92,5 +69,6 @@ union!(allowed_sumbmissions, Set([
 
 submission_selection = sub_wt[[row.id in allowed_sumbmissions for row in eachrow(sub_wt)], :]
 comment_selection = com_wt[[row.submission_id in allowed_sumbmissions for row in eachrow(com_wt)], :]
+@info "Nb of posts kept: $(nrow(submission_selection) + nrow(comment_selection))"
 
 store(output_db, comment_selection, submission_selection)
