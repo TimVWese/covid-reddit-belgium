@@ -1,5 +1,4 @@
 *.db
-*.txt
 *.pbs
 *.pbs*
 *.npy
@@ -7,3 +6,5 @@
 *.zst
 Manifest.toml
 .venv
+
+results

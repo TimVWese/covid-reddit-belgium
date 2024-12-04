@@ -1,14 +1,20 @@
-using SQLite
+using CSV
 using DataFrames
 using Dates
 using ProgressMeter
+using Statistics
+using SQLite
 
 global DATA_DIR, RESULT_DIR
-const DATA_DB = joinpath(@__DIR__, "..", "data", "06_belgium.db")
-const RESULT_DIR = joinpath(@__DIR__, "..", "results")
+const DATA_DB = joinpath(@__DIR__, "data", "06_belgium.db")
+const RESULT_DIR = joinpath(@__DIR__, "results")
 
-global DISCARD_AUTHORS
-DISCARD_AUTHORS = ["AutoModerator", "[deleted]"]
+global AUTHOR_AUTO, AUTHOR_DELETE
+const AUTHOR_AUTO = "AutoModerator"
+const AUTHOR_DELETE = "[deleted]"
+
+global DATE_RANGE
+DATE_RANGE = Date(2020, 1, 1):Day(1):Date(2022, 12, 31)
 
 @enum Topic begin
     vaccin = 1
@@ -54,11 +60,15 @@ end
 
 Get the comments and submissions from the reddit database at `path`.
 """
-function get_comments_and_submissions(path=DATA_DB; discard::Dict=Dict())
+function get_comments_and_submissions(path=DATA_DB; discard::Dict=Dict(), date_range=DATE_RANGE)
     db = SQLite.DB(path)
     comments = handle_reddit_db(db, "comment"; discard=discard)
     submissions = handle_reddit_db(db, "submission"; discard=discard)
 
+    if !isnothing(date_range)
+        submissions = submissions[ein(submissions.date, date_range), :]
+        comments = comments[ein(comments.submission_id, submissions.id), :]
+    end
     return comments, submissions
 end
 
