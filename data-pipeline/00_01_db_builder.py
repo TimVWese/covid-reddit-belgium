@@ -10,8 +10,8 @@ import zstandard
 
 global input_dir, database_location, SUBMISSION_COLUMNS, COMMENT_COLUMNS
 
-input_dir = "00_zsts"
-database_location = "01_belgium.db"
+input_dir = "data/00_zsts"
+database_location = "data/01_belgium.db"
 
 SUBMISSION_COLUMNS = (
     "id",

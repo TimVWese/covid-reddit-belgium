@@ -1,42 +1,25 @@
-using SQLite
-using DataFrames
-using Dates
-using ProgressMeter
+include(joinpath(@__DIR__, "..", "util.jl"))
 
-input_db = SQLite.DB("05_belgium_top_sent.db")
-output_db = SQLite.DB("06_belgium_covid.db")
+input_db = SQLite.DB("data/05_belgium.db")
+output_db = SQLite.DB("data/06_belgium.db")
 
 comments = DataFrame(DBInterface.execute(input_db, "SELECT * FROM comment"))
 submissions = DataFrame(DBInterface.execute(input_db, "SELECT * FROM submission"))
 
 global topic_cols, sentiment_models
 topic_cols = ["vaccine", "masks", "lockdown", "schools", "quarantine", "closinghoreca", "testing", "curfew", "othermeasure", "notapplicable"]
-sentiment_models = ["bert", "vader"]
+sentiment_models = ["bert"]
 
-@enum Topic begin
-    vaccin = 1
-    mask = 2
-    lockdown = 3
-    school = 4
-    quarantine = 5
-    horeca = 6
-    test = 7
-    curfew = 8
-    other = 9
-    notapplicable = 10
-end
-
-function str2topic(str::String)::Topic
+function to_topic(str::String)::Topic
     t = findfirst(topic -> occursin(string(topic), str), instances(Topic))
     return isnothing(t) ? notapplicable : Topic(t)
 end
 
-function str2topic(sym::Symbol)::Topic
-    return str2topic(string(sym))
-end
+to_topic(sym::Symbol)::Topic = to_topic(string(sym))
+to_topic(t::Topic) = t
 
-str2float(x::String) = parse(Float64, x)
-str2float(x::Missing) = missing
+Base.Float64(s::AbstractString) = parse(Float64, s)
+Base.Float64(::Missing) = missing
 
 function discard_short_results!(df; threshold=3)
     sentiment_cols = [n for n in names(df) if any(m->occursin(m, n), sentiment_models)]
@@ -59,42 +42,14 @@ function handle_df!(df::DataFrame)
     end
 
     df.subreddit = lowercase.(df.subreddit)
-    df.topic = str2topic.(df.topic)
-    map(col -> df[!,col] .= str2float.(df[!,col]), topic_cols)
+    df.topic = to_topic.(df.topic)
+    map(col -> df[!,col] .= Float64.(df[!,col]), topic_cols)
 
     discard_short_results!(df)
 
-    df.bert = -1. * df.bert_negative .+ df.bert_positive
-    df.bert_multi = -1. * df.bert_multi_1 .-.5*df.bert_multi_2 .+ .5*df.bert_multi_4 .+ df.bert_multi_5
-    DataFrames.rename!(df, :vader_compound => :vader)
-end
-
-struct ParentLookup
-    comments::DataFrame
-    submissions::DataFrame
-    comment_id_to_idx::Dict{String, Int}
-    submission_id_to_idx::Dict{String, Int}
-end
-
-function ParentLookup(comments::DataFrame, submissions::DataFrame)
-    comment_id_to_idx = Dict(id => i for (i, id) in enumerate(comments.id))
-    submission_id_to_idx = Dict(id => i for (i, id) in enumerate(submissions.id))
-    return ParentLookup(comments, submissions, comment_id_to_idx, submission_id_to_idx)
-end
-
-function (lookup::ParentLookup)(row::DataFrameRow; full=true)
-    parent_id = row.parent_id
-    if ismissing(parent_id) || length(parent_id) <= 3
-        return missing
-    end
-    is_comment = parent_id[1:3] == "t1_"
-    id = parent_id[4:end]
-    df = is_comment ? lookup.comments : lookup.submissions
-    id_to_idx = is_comment ? lookup.comment_id_to_idx : lookup.submission_id_to_idx
-    if !haskey(id_to_idx, id)
-        return missing
-    end
-    return full ? df[id_to_idx[id], :] : id_to_idx[id]
+    ("bert_negative" in names(df)) && (df.bert = -1. * df.bert_negative .+ df.bert_positive)
+    ("bert_multi_1" in names(df)) && (df.bert_multi = -1. * df.bert_multi_1 .-.5*df.bert_multi_2 .+ .5*df.bert_multi_4 .+ df.bert_multi_5)
+    ("vader_compound" in names(df)) && rename!(df, :vader_compound => :vader)
 end
 
 """
@@ -123,7 +78,7 @@ Update the topics in `comments`, such that if the topic is not applicable, or th
 the topic is inferred from the parent comment or submission. returns the number of updated topics.
 """
 function cascade_topics!(comments::DataFrame, submissions::DataFrame)
-    to_be_replaced = row -> row.topic in (notapplicable, other)
+    to_be_replaced = row -> ismissing(row.topic) || row.topic in (notapplicable, other)
     updates = 0
     get_parent = ParentLookup(comments, submissions)
 
@@ -140,18 +95,10 @@ function cascade_topics!(comments::DataFrame, submissions::DataFrame)
     return updates
 end
 
-df = submissions
-if "created_utc" in names(df)
-    df.datetime = unix2datetime.(df.created_utc)
-    df.date = Date.(df.datetime)
-    select!(df, Not(:created_utc))
-end
-
 handle_df!(comments)
 handle_df!(submissions)
 
 add_depth!(comments)
-
 cascade_topics!(comments, submissions)
 
 SQLite.load!(comments, output_db, "comment")

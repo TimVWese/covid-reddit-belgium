@@ -4,8 +4,8 @@ from tqdm import tqdm
 import numpy as np
 from transformers import pipeline
 
-db_path = "02_belgium.db"
-output_path = "03_topics/"
+db_path = "data/02_belgium.db"
+output_path = "data/03_topics/"
 
 global DTAI_TOPICS
 DTAI_TOPICS = ["vaccine", "masks", "lockdown", "schools", "quarantine", "closing-horeca", "testing", "curfew", "other-measure", "not-applicable"]

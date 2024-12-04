@@ -3,8 +3,8 @@ using DataFrames
 using DelimitedFiles
 using Dates
 
-input_db = SQLite.DB("01_belgium.db")
-output_db = SQLite.DB("02_belgium.db")
+input_db = SQLite.DB("data/01_belgium.db")
+output_db = SQLite.DB("data/02_belgium.db")
 
 function get_submission_ids(database, terms)
     submissions = DataFrame(DBInterface.execute(database, "SELECT * FROM submission"))

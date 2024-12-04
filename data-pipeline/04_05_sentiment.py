@@ -1,5 +1,6 @@
 import sqlite3
 import sys
+import time
 from urllib.error import HTTPError
 
 # from utils.db_utils import *
@@ -13,13 +14,13 @@ THREADED = False # Recommended if perspective is used
 enabled_models = {
     "transformers": True,
     "pattern": False, # If True, transformers must be true as well to infer the language
-    "vader": True,
+    "vader": False,
     "perspective": False,
 }
 
 paths = {
-    "input":  "04_belgium_topics.db",
-    "target": "05_belgium_top_sent.db",
+    "input":  "data/04_belgium.db",
+    "target": "data/05_belgium.db",
 }
 
 SENTIMENT_COLUMNS = []
@@ -36,11 +37,33 @@ if enabled_models["perspective"]:
 perspective_langs = {'de', 'es', 'fr', 'hi', 'nl', 'ja', 'id', 'sv', 'ru', 'it', 'en', 'pt', 'ko', 'cs', 'zh', 'pl', 'ar'}
 bert_multi_langs = {"en", "fr", "nl", "de", "es", "it"}
 
+def timed_request(request, max_wait_time=10, verbose=False):
+    """
+    Make a request to reddit. If the request fails because of too many requests,
+    wait for a certain amount of time and try again.
+    """
+    def wait(i):
+        t = 2**i
+        if verbose:
+            print("Too many requests, waiting {} seconds".format(t))
+        time.sleep(t)
+
+    for i in range(max_wait_time):
+        try:
+            return request()
+        except HTTPError as e:
+            if e.code == 429 or e.code // 100 == 5:
+                wait(i)
+            else:
+                raise e
+
+    return request()
+
 def define_transformer_models(models):
     from transformers import pipeline
     # language detection
     lang_pipe = pipeline(
-        "text-classification", model="papluca/xlm-roberta-base-language-detection"
+        "text-classification", model="papluca/xlm-roberta-base-language-detection",
     )
     models["lang"] = lambda s: lang_pipe(s)[0]["label"]
 
@@ -119,7 +142,6 @@ def define_vader_models(models):
 
 def define_perspectiveAPI_models(models):
     from perspective import PerspectiveAPI
-    from utils.reddit_utils import timed_request
     perspective_pipe = PerspectiveAPI("AIzaSyCd_HpZqKbdVG06scyprzfm_kTokECCAxQ")
     def toxicity(string):
         sleep(0.75)
@@ -390,7 +412,7 @@ def from_database(input_path, target_path, models, commit_every=1000, threaded=F
     _, input_cursor, target_conn, target_cursor = get_connections_cursors(input_path, target_path)
     subreddits = get_subreddits(input_cursor)
     outer_progress_bar = tqdm(total=get_total_count(input_cursor))
-    
+
     for sub_idx, subreddit in enumerate(subreddits):
         outer_progress_bar.set_description(f"{sub_idx}/{len(subreddits)}")
 

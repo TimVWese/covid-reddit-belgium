@@ -4,9 +4,9 @@ using NPZ
 
 DTAI_TOPICS = ["vaccine", "masks", "lockdown", "schools", "quarantine", "closinghoreca", "testing", "curfew", "othermeasure", "notapplicable"]
 
-topic_path = "03_topics/"
-input_db = SQLite.DB("02_belgium.db")
-output_db = SQLite.DB("04_belgium.db")
+topic_path = "data/03_topics/"
+input_db = SQLite.DB("data/02_belgium.db")
+output_db = SQLite.DB("data/04_belgium.db")
 
 comments = DataFrame(DBInterface.execute(input_db, "SELECT * FROM comment"))
 submissions = DataFrame(DBInterface.execute(input_db, "SELECT * FROM submission"))
