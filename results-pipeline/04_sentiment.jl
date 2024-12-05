@@ -1,0 +1,333 @@
+include(joinpath(dirname(@__FILE__), "..", "util.jl"))
+comments, submissions = get_comments_and_submissions(; discard=Dict(:author=>[AUTHOR_AUTO,]))
+
+subreddits = ["belgium"]
+
+path = joinpath(RESULT_DIR, "04_sentiment")
+contexts =["gen", "prev_parent"]
+topics = ["vaccin"=>x->x.topic==vaccin, "mask"=>x->x.topic==mask, "lockdown"=>x->x.topic==lockdown]
+signals = ["bert"=>x->select_lang(x, "en")]
+n = 5
+
+"""
+    aggregate_mean_values(comments::AbstractDataFrame, cols)
+
+Aggregate the mean of values in `cols` for each column in `comments`.
+"""
+function aggregate_mean_values(comments::AbstractDataFrame, cols)
+    result = DataFrame([col => [0.,] for col in cols]...)
+    counts = Dict([col => 0 for col in cols])
+    for comment in eachrow(comments)
+        for col in cols
+            if !ismissing(comment[col])
+                result[1, col] += comment[col]
+                counts[col] += 1
+            end
+        end
+    end
+    foreach(col -> result[1, col] /= counts[col], cols)
+    return result[1, :]
+end
+
+"""
+    get_ancestors(comment::DataFrameRow, parent_lookup::ParentLookup, generations::Int)
+
+Get the ancestors (parents of parents) of `comment` up to `generations` back.
+"""
+function get_ancestors(comment::DataFrameRow, parent_lookup::ParentLookup, generations::Int, cols)
+    if !ismissing(comment.depth) && comment.depth < generations
+        return missing
+    end
+    ancestors = Matrix{Union{Float64,Missing}}(undef, generations, length(cols))
+    current = comment
+    for i in 1:generations
+        parent = parent_lookup(current)
+        if ismissing(parent) || (is_submission(parent) && i < generations)
+            return missing
+        end
+        foreach(j -> ancestors[i,j] = parent[cols[j]], eachindex(cols))
+        current = parent
+    end
+    return DataFrame(ancestors, cols)
+end
+
+"""
+    add_ancestor_means!(to_process, submissions, generations; all_comments=nothing, cols=BASE_SENTIMENT_COLUMNS)
+
+Add the mean of the values in `cols` of the `genrations` ancestors of `to_process`.
+"""
+function add_ancestor_means!(to_process, submissions, generations; all_comments=nothing, cols=BASE_SENTIMENT_COLUMNS)
+    all_comments = isnothing(all_comments) ? to_process : all_comments
+    get_parent = ParentLookup(all_comments, submissions)
+    if !("depth" in names(to_process))
+        add_depth!(to_process)
+    end
+    for col in cols
+        to_process[!, "gen_$(generations)_$col"] = Array{Union{Float64,Missing}}(missing, size(to_process, 1))
+    end
+    pb = Progress(size(to_process, 1), 1)
+
+    Threads.@threads for row in eachrow(to_process)
+        ancestors = get_ancestors(row, get_parent, generations, cols)
+        ancestors_mean = !ismissing(ancestors) ? aggregate_mean_values(ancestors, cols) : continue
+        foreach(col -> row["gen_$(generations)_$col"] = ancestors_mean[col], cols)
+        next!(pb)
+    end
+end
+
+"""
+    get_previous_comment(row::DataFrameRow, comments::DataFrame)
+
+Get the previous comment of the author of `row` in `comments`.
+"""
+function get_previous_comments_parents(row::DataFrameRow, comments::DataFrame, parent_lookup::ParentLookup, cols, nb=1)
+    author = row.author
+    datetime = row.datetime
+    previous = comments[comments.author .== author, :] |>
+        x -> sort(x[x.datetime .<= datetime, :], :datetime) |>
+        x -> size(x, 1) < nb ? missing : x[end-nb+1:end, :]
+    if ismissing(previous)
+        return missing, missing
+    else
+        parents = Matrix{Union{Float64,Missing}}(undef, size(previous, 1), length(cols))
+        for (i, comment) in enumerate(eachrow(previous))
+            parent = parent_lookup(comment)
+            if ismissing(parent)
+                return missing, missing
+            end
+            foreach(j -> parents[i,j] = parent[cols[j]], eachindex(cols))
+        end
+        return previous, DataFrame(parents, cols)
+    end
+end
+
+"""
+    add_previous_means!(to_process, submissions, number; all_comments=nothing, cols=BASE_SENTIMENT_COLUMNS)
+
+Add the mean of the values in `cols` of the previous `number` comments of the author of `to_process`.
+"""
+function add_previous_means!(to_process, submissions, number; all_comments=nothing, cols=BASE_SENTIMENT_COLUMNS)
+    all_comments = isnothing(all_comments) ? to_process : all_comments
+    get_parent = ParentLookup(all_comments, submissions)
+    for col in cols
+        to_process[!, "prev_$(number)_$col"] = Array{Union{Float64,Missing}}(missing, size(to_process, 1))
+        to_process[!, "prev_parent_$(number)_$col"] = Array{Union{Float64,Missing}}(missing, size(to_process, 1))
+    end
+    pb = Progress(size(to_process, 1), 1)
+
+    Threads.@threads for row in eachrow(to_process)
+        previous_comments, previous_parents = get_previous_comments_parents(row, to_process, get_parent, cols, number)
+        previous_means = !ismissing(previous_comments) ? aggregate_mean_values(previous_comments, cols) : missing
+        if !ismissing(previous_means)
+            foreach(col -> row["prev_$(number)_$col"] = previous_means[col], cols)
+        end
+        prev_parent_means = !ismissing(previous_parents) ? aggregate_mean_values(previous_parents, cols) : missing
+        if !ismissing(prev_parent_means)
+            foreach(col -> row["prev_parent_$(number)_$col"] = prev_parent_means[col], cols)
+        end
+        next!(pb)
+    end
+end
+
+function add_both_contexts!(comments, submissions, context_size; all_comments=comments, cols=["bert",])
+    for i in 1:context_size
+        add_ancestor_means!(comments, submissions, i; all_comments=all_comments, cols=cols)
+        add_previous_means!(comments, submissions, i; all_comments=all_comments, cols=cols)
+    end
+end
+
+"""
+    mean_sampling(data, n; multiplier=1)
+
+Sample `n` elements from `data` and calculate the mean. Repeat `multiplier`*length(data) times.
+"""
+function mean_sampling(data, n; nb_samples=length(data))
+    data = data[.!ismissing.(data) .&& .! isnan.(data)]
+    return [mean(sample(data, n; replace=true)) for _ in 1:nb_samples]
+end
+
+function get_random_histogram(d1, d2; width=0.05)
+    valid = .!ismissing.(d1 + d2) .&& .!isnan.(d1 + d2)
+    d1,d2 = Float64.(d1[valid]), Float64.(d2[valid])
+    bins = (-1. - width/2):width:(1. + width/2)
+
+    h1 = fit(Histogram, d1, bins)
+    h2 = fit(Histogram, d2, bins)
+    r1 = h1.weights ./ (width*sum(h1.weights))
+    r2 = h2.weights ./ (width*sum(h2.weights))
+    R = r1*r2'
+
+    return R'
+end
+
+function get_structured_histogram(d1, d2; width=0.05)
+    valid = .!ismissing.(d1 + d2) .&& .!isnan.(d1 + d2)
+    d1,d2 = Float64.(d1[valid]), Float64.(d2[valid])
+    bins = (-1. - width/2):width:(1. + width/2)
+    HD = fit(Histogram, (d1,d2), (bins, bins))
+    D = HD.weights ./ (width^2 * sum(HD.weights))
+
+    return D'
+end
+
+function get_2d_diff(D, R_f; N=50)
+    Rs = [R_f() for _ in 1:N]
+    R = mean(Rs)
+
+    P = Matrix{Float64}(undef, size(D))
+    for idx in eachindex(D)
+        op = D[idx] > R[idx] ? (<) : (>)
+        c = count(Rc -> op(D[idx], Rc[idx]), Rs)
+        P[idx] = c/N
+    end
+
+    return D - R, P
+end
+
+function get_2d_diff(D, R_f, p_val; os=5)
+    N = os*ceil(Int64, 1. / p_val)
+    diff, P = get_2d_diff(D, R_f; N)
+    diff[P .>= p_val] .= 0.
+    return diff
+end
+
+"""
+    hist_and_diff(base_data, observed_data, random_data; p_val=nothing, i=1, os=5)
+
+Calculate the structured histogram and the difference between the observed and random data.
+"""
+function hist_and_diff(base_data, observed_data, random_data; p_val=nothing, i=1, os=5)
+    rd_func = (n) -> mean_sampling(random_data, i; nb_samples=n)
+    Rd_func = () -> get_random_histogram(base_data, rd_func(size(base_data, 1)))
+    D = get_structured_histogram(base_data, observed_data)
+    diff =  isnothing(p_val) ? get_2d_diff(D, Rd_func; N=20*os)[1] : get_2d_diff(D, Rd_func, p_val; os)
+    return D, diff
+end
+
+function diagonalness(D::Matrix{Float64})
+    step = 2. / size(D, 1)
+    xs = (-1 + step/2):step:(1 - step/2)
+    ys = (-1 + step/2):step:(1 - step/2)
+    @assert length(xs) == size(D, 1)
+    @assert length(ys) == size(D, 2)
+    f = (x, y) -> 1 - 2 * abs(x - y)
+    return sum(D[i, j] * (step^2) * f(xs[i], ys[j]) for i in axes(D, 1) for j in axes(D, 2))
+end
+
+function get_differences(comments, submissions, context_size; p_val=0.05, os=50, signal="bert", contexts=contexts)
+    submissions = submissions[ein(submissions.id, comments.submission_id), :]
+    random_data = vcat(comments[!,signal], submissions[!,signal])
+
+    sents = []
+    diffs = []
+    for context in contexts
+        for i in 1:context_size
+            col2 = "$(context)_$(i)_" * signal
+            D, diff = hist_and_diff(comments[!,signal], comments[!,col2], random_data; i, p_val, os)
+            push!(sents, D)
+            push!(diffs, diff)
+        end
+    end
+
+    sz = (context_size, length(contexts))
+    return reshape(sents, sz), reshape(diffs, sz)
+end
+
+function export_as_index_list(D, filename)
+    step = 2. / (size(D, 1) - 1.)
+    xs = -1:step:1
+    ys = -1:step:1
+    @assert length(xs) == size(D, 1)
+    @assert length(ys) == size(D, 2)
+    df = DataFrame(x = [xs[i] for i in axes(D, 1) for j in axes(D, 2)],
+                   y = [ys[j] for i in axes(D, 1) for j in axes(D, 2)],
+                   z = [D[j, i] for i in axes(D, 1) for j in axes(D, 2)])
+    CSV.write(filename, df)
+end
+
+function generate_heatmaps(comments, submissions, topics, signals)
+    result = Dict()
+    for (n_topic, s_topic) in topics
+        result[n_topic] = Dict()
+        for (n_model, s_model) in signals
+            lang_comments = comments[s_model.(eachrow(comments)), :]
+            cb = lang_comments[s_topic.(eachrow(lang_comments)), :]
+            sb = submissions[ein(submissions.id, cb.submission_id), :]
+            add_both_contexts!(cb, sb, 1; all_comments=lang_comments, cols=[n_model,])
+            sents, diffs = get_differences(cb, sb, 1; signal=n_model, contexts=["gen"])
+            result[n_topic][n_model] = Dict()
+            result[n_topic][n_model][:sent] = sents[1,1]
+            result[n_topic][n_model][:diff] = diffs[1,1]
+            result[n_topic][n_model][:h] = diagonalness(diffs[1,1])
+        end
+    end
+    return result
+end
+
+function handle_contexts(comments, submissions, topics, signals, n)
+    result = Dict()
+    for (n_topic, s_topic) in topics
+        result[n_topic] = Dict()
+        for (n_model, s_model) in signals
+            lang_comments = comments[s_model.(eachrow(comments)), :]
+            cb = comments[[s_topic(row) && s_model(row) for row in eachrow(comments)], :]
+            sb = submissions[ein(submissions.id, cb.submission_id), :]
+            add_both_contexts!(cb, sb, n; all_comments=lang_comments, cols=[n_model,])
+            col1 = "gen_$(n)_$(n_model)"
+            col2 = "prev_parent_$(n)_$(n_model)"
+            cb_s = remove_invalid_rows(cb, [col1, col2])
+            N = [size(cb_s, 1), size(unique(cb_s.author),1)]
+            @info "Evaluating $(N[1]) comments of $(N[2]) authors for $(n_topic)"
+            _, diffs = get_differences(cb_s, sb, n; signal=n_model, contexts=["gen", "prev_parent"])
+            diags = DataFrame("x"=>1:n)
+            diags.gen = diagonalness.(diffs[:, 1])
+            diags.prev_parent = diagonalness.(diffs[:, 2])
+            result[n_topic][n_model] = Dict()
+            result[n_topic][n_model][:diags] = diags
+            result[n_topic][n_model][:N_comments] = N[1]
+            result[n_topic][n_model][:N_users] = N[2]
+        end
+    end
+    return result
+end
+
+isdir(path) || mkdir(path)
+
+for subreddit in subreddits
+    comments_sub = comments[comments.subreddit .== subreddit, :]
+    submissions_sub = submissions[ein(submissions.id, comments_sub.submission_id), :]
+
+    heatmaps = generate_heatmaps(comments_sub, submissions_sub, topics, signals)
+    for (topic, models) in heatmaps
+        for (model, data) in models
+            export_as_index_list(data[:sent], joinpath(path, "$(subreddit)_$(topic)_$(model)_sent.csv"))
+            export_as_index_list(data[:diff], joinpath(path, "$(subreddit)_$(topic)_$(model)_diff.csv"))
+        end
+    end
+
+    open(joinpath(path, "$(subreddit)_homophily.csv"), "w") do io
+        println(io, "topic,model,h")
+        for (topic, models) in heatmaps
+            for (model, data) in models
+                println(io, "$topic,$model,$(data[:h])")
+            end
+        end
+    end
+
+    result = handle_contexts(comments_sub, submissions_sub, topics, signals, n)
+    for (topic, models) in result
+        for (model, data) in models
+            CSV.write(joinpath(path, "$(subreddit)_$(topic)_$(model)_context.csv"), data[:diags])
+        end
+    end
+
+    open(joinpath(path, "$(subreddit)_context_info.csv"), "w") do io
+        println(io, "topic,model,N_comments,N_users")
+        for (topic, models) in result
+            for (model, data) in models
+                println(io, "$topic,$model,$(data[:N_comments]),$(data[:N_users])")
+            end
+        end
+    end
+end
+
