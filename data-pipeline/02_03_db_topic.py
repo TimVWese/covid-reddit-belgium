@@ -1,4 +1,4 @@
-import socket, os
+import os
 import sqlite3
 from tqdm import tqdm
 import numpy as np

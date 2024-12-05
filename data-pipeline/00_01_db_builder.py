@@ -137,13 +137,13 @@ def prepare_database(database_location):
     c.execute("""
         CREATE TABLE IF NOT EXISTS submission (
             id text PRIMARY KEY,
-            subreddit text,
-            title text,
             created_utc integer,
+            subreddit text,
             author text,
             score integer,
-            num_comments integer,
+            title text,
             selftext text,
+            num_comments integer,
             url text,
             author_flair_text text,
             author_flair_richtext text,
@@ -155,12 +155,11 @@ def prepare_database(database_location):
         CREATE TABLE IF NOT EXISTS comment (
             id text PRIMARY KEY,
             parent_id text,
+            created_utc integer,
             subreddit text,
-            subreddit_id text,
+            author text,
             score integer,
             body text,
-            created_utc integer,
-            author text,
             controversiality integer,
             author_flair_text text,
             author_flair_richtext text

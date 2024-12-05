@@ -42,8 +42,9 @@ function clean_markdown(input_string::String)
 end
 
 covid_terms = ["corona", "virus", "covid", "mask", "masque", "lockdown", "confin", "quarant", "curfew", "avondklok", "couvre-feu", "couvre feu", "vaccin", "vax", "jab", "booster", "prik", "piqûre", "piqure", "pcr", "plf", "locator form", "cst", "safe ticket"]
-start_date = Int64(datetime2unix(DateTime(2020, 1, 1)))
-end_date = Int64(datetime2unix(DateTime(2023, 1, 1)))
+# Month extra padding to deal with rolling averages later
+start_date = Int64(datetime2unix(DateTime(2019, 12, 1)))
+end_date = Int64(datetime2unix(DateTime(2023, 1, 31)))
 
 covid_submissions_id = get_submission_ids(input_db, covid_terms)
 covid_submission_id_str = "'" * join(covid_submissions_id, "','") * "'"
