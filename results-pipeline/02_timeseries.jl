@@ -12,7 +12,7 @@ end_date = Date(2022, 12, 31)
 windowsize = 14
 
 negative_day_thres = 50 # number of posts before a negative day is considered
-negative_day_quantile = 0.25 #quantile to use for negative day detection
+negative_day_quantile = 0.28 #quantile to use for negative day detection
 
 keydates = Dict([
     vaccin => DataFrame([
@@ -107,20 +107,7 @@ function identify_negative_days(comments, topic, subreddit; language="en", senti
     return pd.date[pd[!,:w_sent] .< w_sent_lb .&& pd.num .> threshold]
 end
 
-subreddit = "belgium"
-topic = mask
-
-pd = get_activity(comments, submissions, topic, subreddit; start_date, end_date, windowsize)
-trend = get_trend(pd, keydates[topic].date; start_date, end_date)
-data = pd
-knots = keydates[topic].date
-drange = max(start_date, minimum(data.date)):min(end_date, maximum(data.date))
-
-data = data[ein(data.date, drange), :]
-knots = [drange[1], knots..., drange[end]]
-init_vals = [data.nb_posts[findfirst(data.date .== d)] for d in knots]
-loss = construct_loss(knots, data)
-result = optimize(loss, init_vals)
+isdir(path) || mkdir(path)
 
 for subreddit in subreddits
     for topic in topics
@@ -130,9 +117,6 @@ for subreddit in subreddits
         CSV.write(joinpath(path, "$(topic)_$(subreddit)_trend.csv"), trend)
     end
 end
-
-negative_day_thres = 50 # number of posts before a negative day is considered
-negative_day_quantile = 0.285 #quantile to use for negative day detection
 
 open(joinpath(path, "negative_days.csv"), "w") do f
     for subreddit in subreddits

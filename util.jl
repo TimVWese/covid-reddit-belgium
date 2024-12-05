@@ -1,8 +1,11 @@
 using CSV
 using DataFrames
 using Dates
+using JLD2
 using ProgressMeter
 using Statistics
+using StatsBase
+using Distributions
 using SQLite
 
 global DATA_DIR, RESULT_DIR
@@ -114,3 +117,95 @@ end
 
 is_comment = row::DataFrameRow -> "body" in names(row)
 is_submission = row::DataFrameRow -> "title" in names(row)
+
+function get_all_cols(categories; prefixes=["ns", "nc"])
+    cols = []
+    for (_, options) in categories
+        for option in options
+            for prefix in prefixes
+                push!(cols, Symbol("$(prefix)_$option"))
+            end
+        end
+    end
+    return cols
+end
+
+"""
+    activity_per_category!(users, comments, submissions, column::Symbol; options=[], user_dict=Dict())
+
+Calculate and update activity metrics per category for users based on comments and submissions.
+
+# Arguments
+- `users`: A DataFrame containing user data.
+- `comments`: A DataFrame containing comment data.
+- `submissions`: A DataFrame containing submission data.
+- `column`: A Symbol representing the column name to categorize by.
+- `options`: An optional array of categories to consider. Defaults to the union of categories found in `comments` and `submissions`.
+- `user_dict`: An optional dictionary mapping authors to user indices. Defaults to a dictionary created from `users.author`.
+
+# Updates
+- Adds/updates columns in `users` DataFrame for:
+  - Number of comments per category (`nc_<column>_<option>`)
+  - Number of submissions per category (`ns_<column>_<option>`)
+  - Total number of activities per category (`nt_<column>_<option>`)
+  - Weighted activity per category (`w_<column>_<option>`), normalized by total activities.
+"""
+function activity_per_category!(users, comments, submissions, column::Symbol; options=[], user_dict=Dict())
+    options = length(options) > 0 ? options : Set(comments[!, column]) ∪ Set(submissions[!, column])
+    user_dict = length(user_dict) > 0 ? user_dict : Dict([author => i for (i, author) in enumerate(users.author)])
+    missing_allowed = any(ismissing.(options))
+
+    for option in options
+        users[!, "nc_$option"] .= 0
+        users[!, "ns_$option"] .= 0
+    end
+
+    for (df, type) in [(comments, "nc"), (submissions, "ns")]
+        for row in eachrow(df)
+            row_option = row[column]
+            if (ismissing(row_option) && !missing_allowed) || (!ismissing(row_option) && !(row_option in options))
+                continue
+            end
+            users[user_dict[row.author], "$(type)_$row_option"] += 1
+        end
+    end
+
+    for option in options
+        users[!, "nt_$option"] = users[!, "nc_$option"] .+ users[!, "ns_$option"]
+        users[!, "w_$option"] = users[!, "nt_$option"] ./ users.total
+    end
+end
+
+"""
+    get_users(comments::DataFrame, submissions::DataFrame) -> DataFrame
+
+Aggregate user activity from two DataFrames: `comments` and `submissions`.
+
+# Arguments
+- `comments::DataFrame`: A DataFrame containing user comments. Must include columns `author` and `id`.
+- `submissions::DataFrame`: A DataFrame containing user submissions. Must include columns `author` and `id`.
+
+# Returns
+- `DataFrame`: A DataFrame with the aggregated number of comments and submissions per author. 
+  Includes columns `author`, `num_comments`, and `num_submissions`, and a calculated `total` column 
+  representing the sum of comments and submissions for each author.
+"""
+function get_users(comments, submissions)
+    users = [comments, submissions] |>
+        x -> (groupby(df, :author) for df in x) |>
+        x -> (combine(g, :id => length, renamecols=false) for g in x) |>
+        x -> (DataFrames.rename(df, "id" => "n") for df in x) |>
+        x -> outerjoin(x..., on=:author, renamecols="c" => "s") |>
+        x -> coalesce.(x, 0)
+    users.total = users.nc .+ users.ns
+    return users
+end
+
+function get_users(comments, submissions, categories::Dict)
+    users = get_users(comments, submissions)
+    user_dict = Dict([author => i for (i, author) in enumerate(users.author)])
+    for (category, options) in categories
+        activity_per_category!(users, comments, submissions, category; options=options, user_dict=user_dict)
+    end
+    return users
+end
