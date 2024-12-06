@@ -1,4 +1,5 @@
 import sqlite3
+import os
 import sys
 import time
 from urllib.error import HTTPError
@@ -142,7 +143,7 @@ def define_vader_models(models):
 
 def define_perspectiveAPI_models(models):
     from perspective import PerspectiveAPI
-    perspective_pipe = PerspectiveAPI("AIzaSyCd_HpZqKbdVG06scyprzfm_kTokECCAxQ")
+    perspective_pipe = PerspectiveAPI(os.getenv("PERSPECTIVE_API_KEY"))
     def toxicity(string):
         sleep(0.75)
         try:
@@ -399,8 +400,6 @@ def get_insert_string(table, base_columns):
     insert_string = insert_string[:-2] + ")"
     values_string = values_string[:-2] + ")"
     return insert_string + " " + values_string, columns
-
-import sqlite3
 
 def get_column_names(cursor, table_name):
     cursor.execute(f"PRAGMA table_info({table_name})")

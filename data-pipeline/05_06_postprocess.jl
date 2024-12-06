@@ -103,3 +103,13 @@ cascade_topics!(comments, submissions)
 
 SQLite.load!(comments, output_db, "comment")
 SQLite.load!(submissions, output_db, "submission")
+
+function get_number(db_loc, table)
+    db = SQLite.DB(joinpath("data", db_loc))
+    return DataFrame(DBInterface.execute(db, "SELECT COUNT(*) FROM $table"))[1,1]
+end
+
+db_df = DataFrame(:db => [f for f in readdir("data") if endswith(f, ".db")])
+db_df.n_subs = get_number.(db_df.db, "submission")
+db_df.n_coms = get_number.(db_df.db, "comment")
+db_df.total = db_df.n_subs .+ db_df.n_coms

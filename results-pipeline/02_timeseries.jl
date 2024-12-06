@@ -8,7 +8,7 @@ subreddits = ["belgium"]
 topics = [lockdown, mask, vaccin]
 path = joinpath(RESULT_DIR, "02_timeseries")
 start_date = Date(2020, 1, 1)
-end_date = Date(2022, 12, 31)
+end_date = Date(2022, 6, 30)
 windowsize = 14
 
 negative_day_thres = 50 # number of posts before a negative day is considered
@@ -16,7 +16,7 @@ negative_day_quantile = 0.28 #quantile to use for negative day detection
 
 keydates = Dict([
     vaccin => DataFrame([
-        :date=>[Date(2020,3,16),Date(2020, 12, 28), Date(2021, 9, 22), Date(2021, 11, 01), Date(2022, 07, 01)],
+        :date=>[Date(2020,3,16),Date(2020, 12, 28), Date(2021, 9, 22), Date(2021, 11, 01)],#, Date(2022, 07, 01)],
     ]),
     mask => DataFrame([
         :date=>[Date(2020,07,09), Date(2021,9,17), Date(2021,11,17), Date(2022,03,04)],

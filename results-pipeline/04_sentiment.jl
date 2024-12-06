@@ -136,84 +136,6 @@ function add_both_contexts!(comments, submissions, context_size; all_comments=co
     end
 end
 
-"""
-    mean_sampling(data, n; multiplier=1)
-
-Sample `n` elements from `data` and calculate the mean. Repeat `multiplier`*length(data) times.
-"""
-function mean_sampling(data, n; nb_samples=length(data))
-    data = data[.!ismissing.(data) .&& .! isnan.(data)]
-    return [mean(sample(data, n; replace=true)) for _ in 1:nb_samples]
-end
-
-function get_random_histogram(d1, d2; width=0.05)
-    valid = .!ismissing.(d1 + d2) .&& .!isnan.(d1 + d2)
-    d1,d2 = Float64.(d1[valid]), Float64.(d2[valid])
-    bins = (-1. - width/2):width:(1. + width/2)
-
-    h1 = fit(Histogram, d1, bins)
-    h2 = fit(Histogram, d2, bins)
-    r1 = h1.weights ./ (width*sum(h1.weights))
-    r2 = h2.weights ./ (width*sum(h2.weights))
-    R = r1*r2'
-
-    return R'
-end
-
-function get_structured_histogram(d1, d2; width=0.05)
-    valid = .!ismissing.(d1 + d2) .&& .!isnan.(d1 + d2)
-    d1,d2 = Float64.(d1[valid]), Float64.(d2[valid])
-    bins = (-1. - width/2):width:(1. + width/2)
-    HD = fit(Histogram, (d1,d2), (bins, bins))
-    D = HD.weights ./ (width^2 * sum(HD.weights))
-
-    return D'
-end
-
-function get_2d_diff(D, R_f; N=50)
-    Rs = [R_f() for _ in 1:N]
-    R = mean(Rs)
-
-    P = Matrix{Float64}(undef, size(D))
-    for idx in eachindex(D)
-        op = D[idx] > R[idx] ? (<) : (>)
-        c = count(Rc -> op(D[idx], Rc[idx]), Rs)
-        P[idx] = c/N
-    end
-
-    return D - R, P
-end
-
-function get_2d_diff(D, R_f, p_val; os=5)
-    N = os*ceil(Int64, 1. / p_val)
-    diff, P = get_2d_diff(D, R_f; N)
-    diff[P .>= p_val] .= 0.
-    return diff
-end
-
-"""
-    hist_and_diff(base_data, observed_data, random_data; p_val=nothing, i=1, os=5)
-
-Calculate the structured histogram and the difference between the observed and random data.
-"""
-function hist_and_diff(base_data, observed_data, random_data; p_val=nothing, i=1, os=5)
-    rd_func = (n) -> mean_sampling(random_data, i; nb_samples=n)
-    Rd_func = () -> get_random_histogram(base_data, rd_func(size(base_data, 1)))
-    D = get_structured_histogram(base_data, observed_data)
-    diff =  isnothing(p_val) ? get_2d_diff(D, Rd_func; N=20*os)[1] : get_2d_diff(D, Rd_func, p_val; os)
-    return D, diff
-end
-
-function diagonalness(D::Matrix{Float64})
-    step = 2. / size(D, 1)
-    xs = (-1 + step/2):step:(1 - step/2)
-    ys = (-1 + step/2):step:(1 - step/2)
-    @assert length(xs) == size(D, 1)
-    @assert length(ys) == size(D, 2)
-    f = (x, y) -> 1 - 2 * abs(x - y)
-    return sum(D[i, j] * (step^2) * f(xs[i], ys[j]) for i in axes(D, 1) for j in axes(D, 2))
-end
-
 function get_differences(comments, submissions, context_size; p_val=0.05, os=50, signal="bert", contexts=contexts)
     submissions = submissions[ein(submissions.id, comments.submission_id), :]
     random_data = vcat(comments[!,signal], submissions[!,signal])
@@ -253,12 +175,13 @@ function generate_heatmaps(comments, submissions, topics, signals)
             lang_comments = comments[s_model.(eachrow(comments)), :]
             cb = lang_comments[s_topic.(eachrow(lang_comments)), :]
             sb = submissions[ein(submissions.id, cb.submission_id), :]
-            add_both_contexts!(cb, sb, 1; all_comments=lang_comments, cols=[n_model,])
-            sents, diffs = get_differences(cb, sb, 1; signal=n_model, contexts=["gen"])
+            add_parent_values!(cb, sb; all_comments=lang_comments, cols=[n_model,])
+            random_data = vcat(cb[!,n_model], sb[!,n_model])
+            sent, diff = hist_and_diff(cb[!,n_model], cb[!, "parent_$(n_model)"], random_data; p_val=0.05)
             result[n_topic][n_model] = Dict()
-            result[n_topic][n_model][:sent] = sents[1,1]
-            result[n_topic][n_model][:diff] = diffs[1,1]
-            result[n_topic][n_model][:h] = diagonalness(diffs[1,1])
+            result[n_topic][n_model][:sent] = sent
+            result[n_topic][n_model][:diff] = diff
+            result[n_topic][n_model][:h] = diagonalness(diff)
         end
     end
     return result
