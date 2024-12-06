@@ -101,15 +101,31 @@ handle_df!(submissions)
 add_depth!(comments)
 cascade_topics!(comments, submissions)
 
-SQLite.load!(comments, output_db, "comment")
-SQLite.load!(submissions, output_db, "submission")
+SQLite.load!(comments, output_db, "comment", on_conflict="REPLACE")
+SQLite.load!(submissions, output_db, "submission", on_conflict="REPLACE")
 
-function get_number(db_loc, table)
+function get_number(db_loc, table, start_date, end_date)
     db = SQLite.DB(joinpath("data", db_loc))
-    return DataFrame(DBInterface.execute(db, "SELECT COUNT(*) FROM $table"))[1,1]
+    if "created_utc" in names(DataFrame(DBInterface.execute(db, "SELECT * FROM $table LIMIT 1")))
+        start_date = datetime2unix(start_date)
+        end_date = datetime2unix(end_date)
+        return DataFrame(DBInterface.execute(db, "SELECT COUNT(*) FROM $table WHERE created_utc BETWEEN $start_date AND $end_date"))[1,1]
+    else
+        return 0
+    end
 end
 
+start_date = DateTime(minimum(DATE_RANGE))
+end_date = DateTime(maximum(DATE_RANGE)+Day(1))
+
 db_df = DataFrame(:db => [f for f in readdir("data") if endswith(f, ".db")])
-db_df.n_subs = get_number.(db_df.db, "submission")
-db_df.n_coms = get_number.(db_df.db, "comment")
-db_df.total = db_df.n_subs .+ db_df.n_coms
+db_df.n_subs = get_number.(db_df.db, "submission", start_date, end_date)
+db_df.n_coms = get_number.(db_df.db, "comment", start_date, end_date)
+
+row_final = findfirst(row -> row.db == split(output_db.file, "/")[end], eachrow(db_df))
+submissions.datetime
+db_df[row_final, :n_subs] = count(d in DATE_RANGE for d in submissions.date)
+db_df[row_final, :n_coms] = count(d in DATE_RANGE for d in comments.date)
+db_df.n_tot = db_df.n_subs + db_df.n_coms
+
+CSV.write("data/db_sizes.csv", db_df)
