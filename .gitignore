@@ -8,4 +8,6 @@
 Manifest.toml
 .venv
 
+data
 results
+mcmc-chains
