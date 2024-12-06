@@ -5,7 +5,7 @@ subreddits = ["belgium"]
 
 path = joinpath(RESULT_DIR, "04_sentiment")
 contexts =["gen", "prev_parent"]
-topics = ["vaccin"=>x->x.topic==vaccin, "mask"=>x->x.topic==mask, "lockdown"=>x->x.topic==lockdown]
+topics = ["lockdown"=>x->x.topic==lockdown, "mask"=>x->x.topic==mask, "vaccin"=>x->x.topic==vaccin, ]
 signals = ["bert"=>x->select_lang(x, "en")]
 n = 5
 
@@ -176,12 +176,16 @@ function generate_heatmaps(comments, submissions, topics, signals)
             cb = lang_comments[s_topic.(eachrow(lang_comments)), :]
             sb = submissions[ein(submissions.id, cb.submission_id), :]
             add_parent_values!(cb, sb; all_comments=lang_comments, cols=[n_model,])
+            cb = remove_invalid_rows(cb, [n_model, "parent_$(n_model)"])
+            sb = remove_invalid_rows(sb, [n_model])
             random_data = vcat(cb[!,n_model], sb[!,n_model])
             sent, diff = hist_and_diff(cb[!,n_model], cb[!, "parent_$(n_model)"], random_data; p_val=0.05)
             result[n_topic][n_model] = Dict()
             result[n_topic][n_model][:sent] = sent
             result[n_topic][n_model][:diff] = diff
             result[n_topic][n_model][:h] = diagonalness(diff)
+            result[n_topic][n_model][:N_users] = size(unique(cb.author), 1)
+            result[n_topic][n_model][:N_comments] = size(cb, 1)
         end
     end
     return result
@@ -220,37 +224,44 @@ for subreddit in subreddits
     comments_sub = comments[comments.subreddit .== subreddit, :]
     submissions_sub = submissions[ein(submissions.id, comments_sub.submission_id), :]
 
+    other_info = DataFrame()
+    other_info.topic = vcat([fill(String(topic[1]), length(signals)) for topic in topics]...)
+    other_info.model = vcat(fill([signal[1] for signal in signals], length(topics))...)
+    pair_to_row = Dict((other_info.topic[r] => other_info.model[r]) => r for r in 1:nrow(other_info))
+
     heatmaps = generate_heatmaps(comments_sub, submissions_sub, topics, signals)
+    Ns_users_full = Array{Int64, 1}(undef, nrow(other_info))
+    Ns_comments_full = Array{Int64, 1}(undef, nrow(other_info))
+    hs_full = Array{Float64, 1}(undef, nrow(other_info))
     for (topic, models) in heatmaps
         for (model, data) in models
             export_as_index_list(data[:sent], joinpath(path, "$(subreddit)_$(topic)_$(model)_sent.csv"))
             export_as_index_list(data[:diff], joinpath(path, "$(subreddit)_$(topic)_$(model)_diff.csv"))
+            Ns_users_full[pair_to_row[topic=>model]] = data[:N_users]
+            Ns_comments_full[pair_to_row[topic=>model]] = data[:N_comments]
+            hs_full[pair_to_row[topic=>model]] = data[:h]
         end
     end
-
-    open(joinpath(path, "$(subreddit)_homophily.csv"), "w") do io
-        println(io, "topic,model,h")
-        for (topic, models) in heatmaps
-            for (model, data) in models
-                println(io, "$topic,$model,$(data[:h])")
-            end
-        end
-    end
+    other_info.N_users_full = Ns_users_full
+    other_info.N_comments_full = Ns_comments_full
+    other_info.h_full = hs_full
 
     result = handle_contexts(comments_sub, submissions_sub, topics, signals, n)
+    N_users_context = Array{Int64, 1}(undef, nrow(other_info))
+    N_comments_context = Array{Int64, 1}(undef, nrow(other_info))
+    hs_context = Array{Float64, 1}(undef, nrow(other_info))
     for (topic, models) in result
         for (model, data) in models
             CSV.write(joinpath(path, "$(subreddit)_$(topic)_$(model)_context.csv"), data[:diags])
+            N_users_context[pair_to_row[topic=>model]] = data[:N_users]
+            N_comments_context[pair_to_row[topic=>model]] = data[:N_comments]
+            hs_context[pair_to_row[topic=>model]] = data[:diags][1,2]
         end
     end
+    other_info.N_users_context = N_users_context
+    other_info.N_comments_context = N_comments_context
+    other_info.h_context = hs_context
 
-    open(joinpath(path, "$(subreddit)_context_info.csv"), "w") do io
-        println(io, "topic,model,N_comments,N_users")
-        for (topic, models) in result
-            for (model, data) in models
-                println(io, "$topic,$model,$(data[:N_comments]),$(data[:N_users])")
-            end
-        end
-    end
+    CSV.write(joinpath(path, "$(subreddit)_other_info.csv"), other_info)
 end
 
