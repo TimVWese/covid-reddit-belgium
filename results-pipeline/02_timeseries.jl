@@ -27,21 +27,6 @@ keydates = Dict([
 ])
 
 """
-    per_day(df::DataFrame, ops::Pair...)
-
-Aggregate per day, aggregating the desired columns by the `ops`. 
-"""
-function per_day(df::DataFrame, ops::Pair...)
-    pd = groupby(df, :date) |>
-          group -> combine(group, :id => length, ops..., renamecols=false) |>
-                   df -> sort(df, :date)
-    DataFrames.rename!(pd, :id => :num)
-    result = DataFrame(:date=>minimum(pd.date):Day(1):maximum(pd.date))
-    leftjoin!(result, pd, on=:date)
-    return coalesce.(result, 0)
-end
-
-"""
     rolling_per_day(comments; selector=row->true, windowsize=14)
 
 Get the rolling mean of the number of comments per day

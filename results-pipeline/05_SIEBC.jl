@@ -4,14 +4,21 @@ using SciMLSensitivity, ReverseDiff
 using Interpolations
 using Printf
 using HypothesisTests
+using Optim
+using Random
+using RollingFunctions
 
 include(joinpath(@__DIR__, "..", "util.jl"))
+
 # Allow to interpret some more dates to improve fitting at boundaries
+MCMC_PATH = joinpath(@__DIR__, "..", "mcmc-chains")
 broad_date_range=Date(2019,11,1):Date(2022,8,31)
 date_range = Date(2020, 1, 1):Date(2022, 6, 30)
+topics = [lockdown, mask, vaccin]
+nb_comment_threshold = 40
+result_dir = joinpath(RESULT_DIR, "05_siebc")
+
 comments, submissions = get_comments_and_submissions(; discard=Dict(:author=>[AUTHOR_AUTO, AUTHOR_DELETE]), date_range=broad_date_range)
-topics = [vaccin, mask, lockdown]
-MCMC_PATH = joinpath(@__DIR__, "..", "mcmc-chains")
 
 """
    bc_kernel(; α=0.5, ϵ=0.1, type::Symbol=:logistic, truncated=true)
@@ -99,7 +106,7 @@ the reply can be on any topic.
 - `author_comments`: DataFrame of comments from authors who meet the criteria.
 - `author_submissions`: DataFrame of submissions associated with the filtered comments.
 """
-function get_author_comments(comments, submissions, topic; threshold=50)
+function get_author_comments(comments, submissions, topic, threshold)
     sort!(comments, :datetime)
     topic_comments = comments[select_lang(comments, "en") .&& comments.topic.==topic, :]
     add_parent_values!(topic_comments, submissions; cols=[:bert, :author, :topic])
@@ -141,9 +148,9 @@ function process(focal_user, comments; type=:logistic, N_samples_per=500, N_para
     return chain
 end
 
-function handle(comments, submissions, topic; type=:logistic, threshold=50, N_samples_per=500,
+function handle(comments, submissions, topic, threshold; type=:logistic, N_samples_per=500,
     N_parallel_in=6, N_parallel_out=5, save_suffix="", mcmc_path=MCMC_PATH)
-    a_coms, _ = get_author_comments(comments, submissions, topic; threshold=threshold)
+    a_coms, _ = get_author_comments(comments, submissions, topic, threshold)
     save_suffix = save_suffix * "_" * string(type)
     save_dir = joinpath(mcmc_path, "$(topic)$(save_suffix)/")
     !isdir(save_dir) && mkdir(save_dir)
@@ -167,7 +174,324 @@ function handle(comments, submissions, topic; type=:logistic, threshold=50, N_sa
     end
 end
 
-for topic in topics
-    handle(comments, submissions, topic; type=:logistic)
-    handle(comments, submissions, topic; type=:linear)
+# for topic in topics
+#     handle(comments, submissions, topic, nb_comment_threshold; type=:logistic)
+#     handle(comments, submissions, topic, nb_comment_threshold; type=:linear)
+# end
+
+#################
+# Interpretation
+#################
+function order_chain(chain)
+    parameter_syms = [:ϵ, :α₁, :α₂, :σ₁, :σ₂]
+    state_syms = setdiff(chain.name_map.parameters, parameter_syms)
+    all_syms = vcat(parameter_syms, state_syms)
+    return hcat([Array(chain[sym])[:] for sym in all_syms]...)
 end
+
+function get_comments_and_chains(comments, topic, suffix, mcmc_path=MCMC_PATH)
+    comments = comments[:, [:id, :author, :parent_id, :parent_author, :bert, :parent_bert]]
+    authors = unique(comments.author)
+    data_dir = joinpath(mcmc_path, "$(topic)_$(suffix)")
+    available_authors = [s[1:end-5] for s in readdir(data_dir) if occursin(".jld2", s)]
+    @assert all([author in available_authors for author in authors]) &&
+        all([author in authors for author in available_authors])
+    a2idx = Dict([author => idx for (idx, author) in enumerate(authors)])
+    chains = [order_chain(JLD2.load(joinpath(data_dir, "$(author).jld2"))["chain"]) for author in authors]
+
+    comments.sent = Vector{Union{Missing, Float64}}(missing, size(comments, 1))
+    comments.parent_sent = Vector{Union{Missing, Float64}}(missing, size(comments, 1))
+    comments.internal = Vector{Union{Missing, Float64}}(missing, size(comments, 1))
+    return comments, chains, a2idx
+end
+
+function sample_trajectory!(comments, a2idx, chain_samples; k=25, σ_mult=1, type=:bell)
+    ϵ_idx, α₁_idx, α₂_idx, σ₁_idx, σ₂_idx = 1:5
+    state_offset = 5
+
+    bcs = [bc_kernel(; α=s[α₂_idx], ϵ=s[ϵ_idx], type) for s in chain_samples]
+    σ₂s = [σ_mult*s[σ₂_idx] for s in chain_samples]
+    current_index = ones(Int64, length(chain_samples))
+
+    get_parents = ParentLookup(comments, comments[1:0,:])
+    random_data = []
+
+    get_internal_state = a_idx -> begin
+        cs_idx = state_offset + current_index[a_idx]
+        current_index[a_idx] += 1
+        return chain_samples[a_idx][cs_idx]
+    end
+
+    for comment in eachrow(comments)
+        author_idx = a2idx[comment.author]
+        parent = get_parents(comment)
+        parent_sent = ismissing(parent) ? comment.parent_bert : parent.sent
+        ismissing(parent) && push!(random_data, parent_sent)
+
+        author_state = get_internal_state(author_idx)
+        comment.internal = author_state
+        comment.sent = bcs[author_idx](author_state, parent_sent)
+        comment.parent_sent = parent_sent
+        comment.sent = rand(truncated(Normal(comment.sent, σ₂s[author_idx]), 0., 1.))
+    end
+
+    comments.sent = (2*comments.sent) .- 1
+    comments.parent_sent = (2*comments.parent_sent) .- 1
+
+    return vcat(random_data, comments.sent)
+end
+
+function infer_type(suffix)
+    type = split(suffix, "_")[end]
+    type = (type in ("bell", "logistic", "linear", "discrete")) ? Symbol(type) : :bell
+    return type
+end
+
+"""
+    interpret_data(comments, p_val=0.05; N_samples=nothing)
+
+Interpret the data from comments and perform statistical analysis.
+
+# Arguments
+- `comments::DataFrame`: A DataFrame containing the comments data with columns `:id`, `:author`, `:parent_id`, `:parent_author`, `:bert`, and `:parent_bert`.
+- `p_val::Float64`: The p-value threshold for statistical significance (default is 0.05).
+- `N_samples::Union{Int, Nothing}`: The number of samples to draw. If `nothing`, the number of samples is determined by the length of the chains (default is `nothing`).
+
+# Returns
+- `hs::Vector{Float64}`: A vector of diagonalness scores for each sample.
+- `all_sents::Vector{Float64}`: A vector of all sampled sentences.
+
+# Description
+This function processes the comments data, ensuring that all authors have corresponding MCMC chains available.
+It then samples trajectories from these chains and performs statistical analysis to compute diagonalness scores and collect all sampled sentences.
+"""
+function interpret_data(comments, topic; σ_mult=1., p_val=0.05, N_samples=nothing, suffix="")
+    comments, chains, a2idx = get_comments_and_chains(comments, topic, suffix)
+    type = infer_type(suffix)
+
+    selector = (chains, _) -> [rand(eachrow(chain)) for chain in chains]
+    if N_samples == nothing
+        N_samples = size(chains[1], 1)
+        @assert all(chain -> size(chain, 1) == N_samples, chains)
+        selector = (chains, idx) -> [chain[idx, :] for chain in chains]
+    end
+
+    hs = Vector{Float64}(undef, N_samples)
+    all_sents = Vector{Float64}(undef, size(comments, 1)*N_samples)
+    mean_internal = zeros(Float64, size(comments, 1))
+    mean_diffs = zeros(Float64, (41, 41))
+
+    @showprogress for i in 1:N_samples
+        random_data = sample_trajectory!(comments, a2idx, selector(chains, i); σ_mult, type)
+        mean_internal += comments.internal
+        D, diff = hist_and_diff(comments.sent, comments.parent_sent, random_data)
+
+        hs[i] = diagonalness(diff)
+        all_sents[(i-1)*size(comments, 1)+1:i*size(comments, 1)] = comments.sent
+        mean_diffs .+= diff
+    end
+
+    return hs, all_sents, mean_internal / N_samples, mean_diffs / N_samples
+end
+
+function get_observed_homophily(comments, submissions; p_val=0.05)
+    random_data = vcat(comments.bert, submissions.bert)
+    rd_f = (n) -> rand(random_data, n)
+    Rd_f = () -> get_random_histogram(comments.bert, rd_f(nrow(comments)))
+    D = get_structured_histogram(comments.bert, comments.parent_bert)
+    diff = get_2d_diff(D, Rd_f, p_val)
+    return diagonalness(diff)
+end
+
+function earthmoverdistance(a::Vector, b::Vector; width = 0.05)
+    return width*sum( abs, cumsum( a ) .- cumsum( b ) )
+end
+
+function get_histogram(observed, predicted; filename=missing, width=0.05)
+    to_weights = (data) -> begin
+        hist = fit(Histogram, data, (-1-width/2):width:(1+width/2))
+        return hist.weights ./ (width*sum(hist.weights))
+    end
+    xs = -1:width:1 # midpoints
+    y_obs = to_weights(observed)
+    y_pred = to_weights(predicted)
+    df = DataFrame(x=xs, y_obs=y_obs, y_pred=y_pred)
+    if !ismissing(filename)
+        @info "Wassertein distance for $(split(filename, "/")[end]): $(earthmoverdistance(y_obs, y_pred; width=width))"
+        CSV.write(filename, df)
+    end
+    return df
+end
+
+function construct_sigma_loss(all_comments, all_submissions, suffix; threshold=40, N_samples=25, topics = [lockdown, mask, vaccin], seed=1234)
+    comments = Dict()
+    chain_samples = Dict()
+    a2idx = Dict()
+    all_sents = Dict()
+    type = infer_type(suffix)
+
+    for topic in topics
+        a_coms, _ = get_author_comments(all_comments, all_submissions, topic, threshold)
+        comments[topic], chains, a2idx[topic] = get_comments_and_chains(a_coms, topic, suffix)
+        chain_samples[topic] = [[rand(eachrow(chain)) for chain in chains] for _ in 1:N_samples]
+        all_sents[topic] = Vector{Float64}(undef, size(comments[topic], 1)*N_samples)
+    end
+
+    return σ_exps -> begin
+        if length(σ_exps) == 1 && length(topics) >1
+            σ_exps = fill(σ_exps[1], length(topics))
+        end
+        W = 0.
+        Random.seed!(seed)
+        for (t_idx, topic) in enumerate(topics)
+            t_coms = comments[topic]
+            for (i, chain_sample) in enumerate(chain_samples[topic])
+                sample_trajectory!(t_coms, a2idx[topic], chain_sample; σ_mult=σ_exps[t_idx], type)
+                all_sents[topic][(i-1)*size(t_coms, 1)+1:i*size(t_coms, 1)] .= t_coms.sent
+            end
+            hist = get_histogram(t_coms.bert, all_sents[topic])
+            W += earthmoverdistance(hist.y_obs, hist.y_pred)^2
+        end
+        return sqrt(W)
+    end
+end
+
+function sample_topics!(
+        comments, submissions, suffix, Ws, hs, full_hs=nothing; N_samples=nothing, topics=topics,
+        threshold=nb_comment_threshold, result_dir=result_dir, optim_init=[1.,1.,1.],
+        optim_samples=250, optim_options=Optim.Options(iterations=100)
+    )
+
+    sl = construct_sigma_loss(comments, submissions, suffix; N_samples=optim_samples, topics, threshold)
+    σ_opt = optimize(sl, optim_init, NelderMead(), optim_options)
+
+    Threads.@threads for t_idx in eachindex(topics)
+        topic = topics[t_idx]
+        a_coms, a_subs = get_author_comments(comments, submissions, topic, nb_comment_threshold)
+        @info "Processing $(topic): $(length(unique(a_coms.author))) authors that made $(nrow(a_coms)) comments."
+        sample_hs, sents, interns, diff = interpret_data(a_coms, topic; N_samples, suffix, σ_mult= σ_opt.minimizer[t_idx])
+        hist = get_histogram(a_coms.bert, sents; filename=(ismissing(result_dir) ? missing : joinpath(result_dir, "$(topic)_histogram.csv")))
+        (!ismissing(result_dir)) && get_state_evolution(a_coms, interns; write_path=joinpath(result_dir, "$(topic)_internal_state.csv"))
+
+        Ws[topic][suffix] = earthmoverdistance(hist.y_obs, hist.y_pred)
+        hs[topic][suffix] = median(sample_hs)
+        hs[topic]["observed"] = get_observed_homophily(a_coms, a_subs)
+        (!isnothing(full_hs)) && (full_hs[topic] = sample_hs)
+    end
+end
+
+function create_alpha_table(topics, suffix, mcmc_dir, result_dir; p_val=0.05)
+    output = open(joinpath(result_dir, "alpha_table.tex"), "w")
+    @printf output "\\begin{tabular}{r|ccc}\n"
+    @printf output "& \\( \\alpha_u \\)    & \\( \\alpha_e \\)    & \\( \\kappa \\)  \\\\\\hline\n"
+    test_per_user = Dict()
+    full_tests = Dict()
+    for topic in topics
+        total_true = 0
+        total_count = 0
+        α₁s = []
+        α₂s = []
+        topic_dir = joinpath(mcmc_dir, "$(topic)_$(suffix)")
+        test_per_user[topic] = []
+        for f in readdir(topic_dir)
+            chain = JLD2.load(joinpath(topic_dir, f))["chain"]
+            chain = Array(chain[[:α₁, :α₂]])
+            total_true += count(chain[:,1] .< chain[:,2])
+            total_count += size(chain, 1)
+            push!(test_per_user[topic], MannWhitneyUTest(Float64.(chain[:,1]), Float64.(chain[:,2])))
+            push!(α₁s, mean(chain[:,1]))
+            push!(α₂s, mean(chain[:,2]))
+        end
+        prop_samp = total_true / total_count
+        prop_users = count((α₁s .< α₂s) .&& (pvalue.(test_per_user[topic]) .< p_val)) / length(α₁s)
+        full_tests[topic] = MannWhitneyUTest(Float64.(α₁s), Float64.(α₂s))
+
+        @printf output "%s && \\( %0.5f \\pm %0.5f \\) & \\( %0.5f \\pm %0.5f \\) & %0.5f \\\\\n" string(topic) mean(α₁s) std(α₁s) mean(α₂s) std(α₂s) prop_users
+    end
+    close(output)
+    return full_tests, test_per_user
+end
+
+function export_boxplot(predicted, filename)
+    df = DataFrame([Symbol(key) => value for (key, value) in predicted])
+    CSV.write(filename, df)
+end
+
+function get_state_interpolator(comments)
+    xs = datetime2unix.(comments.datetime)
+    ys = comments.state
+    itp = nrow(comments) > 1 ? interpolate((xs,), ys, Gridded(Linear())) : x -> ys[1]
+    return x -> begin
+        xu = datetime2unix(x)
+        if !(minimum(xs) <= xu <= maximum(xs))
+            return missing
+        end
+        return itp(xu)
+    end
+end
+
+function get_state_evolution(comments, internals; q=.25, min_data=16, window=14, write_path=nothing, date_range=date_range)
+    comments.state = internals
+    ts = minimum(comments.date):Day(1):maximum(comments.date)
+    itps = [get_state_interpolator(comments[comments.author .== a, :]) for a in unique(comments.author)]
+    A = hcat([[itps[i](DateTime(t)) for i in eachindex(itps)] for t in ts]...) # Internal data
+    rough_valid = (count(.!ismissing.(A), dims=1) .> 0)[:]
+    A = A[:, rough_valid]
+    ts = ts[rough_valid]
+    fine_valid = (count(.!ismissing.(A), dims=1) .> min_data)[:]
+
+    rlm = d -> rollmean(d, window)
+    q1 = rlm([quantile(skipmissing(a), q) for a in eachcol(A)])
+    ms = rlm([median(skipmissing(a)) for a in eachcol(A)])
+    q2 = rlm([quantile(skipmissing(a), 1-q) for a in eachcol(A)])
+
+    fine_valid = fine_valid .&& ein(ts, date_range)
+    ts = ts[fine_valid]
+    fine_valid = fine_valid[7:end-7]
+    q1 = q1[fine_valid]
+    ms = ms[fine_valid]
+    q2 = q2[fine_valid]
+
+    q1 = 2*q1 .- 1.
+    ms = 2*ms .- 1.
+    q2 = 2*q2 .- 1.
+
+    pd = per_day(comments, :bert=>median)
+    obs = rlm(pd.bert[rough_valid])[fine_valid]
+
+    if !isnothing(write_path)
+        df = DataFrame(date=ts, q1=q1, median=ms, q2=q2, obs=obs)
+        CSV.write(write_path, df)
+    end
+
+    return ts, q1, ms, q2, obs
+end
+
+suffix = "logistic"
+
+types = ["observed", "logistic", "linear"]
+result_df = DataFrame()
+result_df.topic = vcat([fill(topic, length(types)) for topic in topics]...)
+result_df.type = vcat([types for _ in topics]...)
+
+Ws = Dict()
+hs = Dict()
+full_hs = Dict()
+
+for topic in topics
+    Ws[topic] = Dict()
+    hs[topic] = Dict()
+    Ws[topic]["observed"] = 0.
+end
+
+sample_topics!(comments, submissions, suffix, Ws, hs, full_hs; optim_init=[.6,.6,.6])
+export_boxplot(full_hs, joinpath(result_dir, "homophily.csv"))
+create_alpha_table(topics, suffix, MCMC_PATH, result_dir)
+
+suffix="linear"
+sample_topics!(comments, submissions, suffix, Ws, hs; result_dir=missing)
+
+result_df.W = [Ws[row.topic][row.type] for row in eachrow(result_df)]
+result_df.h = [hs[row.topic][row.type] for row in eachrow(result_df)]
+CSV.write(joinpath(result_dir, "measures.csv"), result_df)
+
