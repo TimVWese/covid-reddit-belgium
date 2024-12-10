@@ -14,6 +14,7 @@ include(joinpath(@__DIR__, "..", "util.jl"))
 MCMC_PATH = joinpath(@__DIR__, "..", "mcmc-chains")
 broad_date_range=Date(2019,11,1):Date(2022,8,31)
 date_range = Date(2020, 1, 1):Date(2022, 6, 30)
+subreddits = ["belgium"]
 topics = [lockdown, mask, vaccin]
 nb_comment_threshold = 40
 result_dir = joinpath(RESULT_DIR, "05_siebc")
@@ -149,11 +150,11 @@ function process(focal_user, comments; type=:logistic, N_samples_per=500, N_para
 end
 
 function handle(comments, submissions, topic, threshold; type=:logistic, N_samples_per=500,
-    N_parallel_in=6, N_parallel_out=5, save_suffix="", mcmc_path=MCMC_PATH)
+                N_parallel_in=6, N_parallel_out=5, save_suffix="", mcmc_path=MCMC_PATH)
     a_coms, _ = get_author_comments(comments, submissions, topic, threshold)
     save_suffix = save_suffix * "_" * string(type)
     save_dir = joinpath(mcmc_path, "$(topic)$(save_suffix)/")
-    !isdir(save_dir) && mkdir(save_dir)
+    !isdir(save_dir) && mkpath(save_dir)
 
     authors = unique(a_coms.author)
     pb = Progress(length(authors))
@@ -174,10 +175,15 @@ function handle(comments, submissions, topic, threshold; type=:logistic, N_sampl
     end
 end
 
-# for topic in topics
-#     handle(comments, submissions, topic, nb_comment_threshold; type=:logistic)
-#     handle(comments, submissions, topic, nb_comment_threshold; type=:linear)
-# end
+for subreddit in subreddits
+    output_path = joinpath(MCMC_PATH, subreddit)
+    sub_coms = comments[comments.subreddit .== subreddit, :]
+    sub_subs = submissions[submissions.subreddit .== subreddit, :]
+    for topic in topics
+        handle(sub_coms, sub_subs, topic, nb_comment_threshold; type=:logistic, mcmc_path=output_path)
+        handle(sub_coms, sub_subs, topic, nb_comment_threshold; type=:linear, mcmc_path=output_path)
+    end
+end
 
 #################
 # Interpretation
@@ -357,21 +363,23 @@ function construct_sigma_loss(all_comments, all_submissions, suffix; threshold=4
 end
 
 function sample_topics!(
-        comments, submissions, suffix, Ws, hs, full_hs=nothing; N_samples=nothing, topics=topics,
-        threshold=nb_comment_threshold, result_dir=result_dir, optim_init=[1.,1.,1.],
-        optim_samples=250, optim_options=Optim.Options(iterations=100)
+        comments, submissions, suffix, subreddit, Ws, hs, full_hs=nothing; N_samples=nothing,
+        topics=topics, threshold=nb_comment_threshold, result_dir=result_dir,
+        optim_init=[1.,1.,1.], optim_samples=250, optim_options=Optim.Options(iterations=100),
     )
+    sub_coms = comments[comments.subreddit .== subreddit, :]
+    sub_subs = submissions[submissions.subreddit .== subreddit, :]
 
-    sl = construct_sigma_loss(comments, submissions, suffix; N_samples=optim_samples, topics, threshold)
+    sl = construct_sigma_loss(sub_coms, sub_subs, suffix; N_samples=optim_samples, topics, threshold)
     σ_opt = optimize(sl, optim_init, NelderMead(), optim_options)
 
     Threads.@threads for t_idx in eachindex(topics)
         topic = topics[t_idx]
-        a_coms, a_subs = get_author_comments(comments, submissions, topic, nb_comment_threshold)
+        a_coms, a_subs = get_author_comments(sub_coms, sub_subs, topic, nb_comment_threshold)
         @info "Processing $(topic): $(length(unique(a_coms.author))) authors that made $(nrow(a_coms)) comments."
         sample_hs, sents, interns, diff = interpret_data(a_coms, topic; N_samples, suffix, σ_mult= σ_opt.minimizer[t_idx])
-        hist = get_histogram(a_coms.bert, sents; filename=(ismissing(result_dir) ? missing : joinpath(result_dir, "$(topic)_histogram.csv")))
-        (!ismissing(result_dir)) && get_state_evolution(a_coms, interns; write_path=joinpath(result_dir, "$(topic)_internal_state.csv"))
+        hist = get_histogram(a_coms.bert, sents; filename=(ismissing(result_dir) ? missing : joinpath(result_dir, "$(subreddit)_$(topic)_histogram.csv")))
+        (!ismissing(result_dir)) && get_state_evolution(a_coms, interns; write_path=joinpath(result_dir, "$(subreddit)_$(topic)_internal_state.csv"))
 
         Ws[topic][suffix] = earthmoverdistance(hist.y_obs, hist.y_pred)
         hs[topic][suffix] = median(sample_hs)
@@ -467,31 +475,33 @@ function get_state_evolution(comments, internals; q=.25, min_data=16, window=14,
     return ts, q1, ms, q2, obs
 end
 
-suffix = "logistic"
+for subreddit in subreddits
+    suffix = "logistic"
 
-types = ["observed", "logistic", "linear"]
-result_df = DataFrame()
-result_df.topic = vcat([fill(topic, length(types)) for topic in topics]...)
-result_df.type = vcat([types for _ in topics]...)
+    types = ["observed", "logistic", "linear"]
+    result_df = DataFrame()
+    result_df.topic = vcat([fill(topic, length(types)) for topic in topics]...)
+    result_df.type = vcat([types for _ in topics]...)
 
-Ws = Dict()
-hs = Dict()
-full_hs = Dict()
+    Ws = Dict()
+    hs = Dict()
+    full_hs = Dict()
 
-for topic in topics
-    Ws[topic] = Dict()
-    hs[topic] = Dict()
-    Ws[topic]["observed"] = 0.
+    for topic in topics
+        Ws[topic] = Dict()
+        hs[topic] = Dict()
+        Ws[topic]["observed"] = 0.
+    end
+
+    sample_topics!(comments, submissions, suffix, subreddit, Ws, hs, full_hs; optim_init=[.6,.6,.6])
+    export_boxplot(full_hs, joinpath(result_dir, "$(subreddit)_homophily.csv"))
+    create_alpha_table(topics, suffix, joinpath(MCMC_PATH, subreddit), result_dir)
+
+    suffix="linear"
+    sample_topics!(comments, submissions, suffix, subreddit, Ws, hs; result_dir=missing)
+
+    result_df.W = [Ws[row.topic][row.type] for row in eachrow(result_df)]
+    result_df.h = [hs[row.topic][row.type] for row in eachrow(result_df)]
+    CSV.write(joinpath(result_dir, "$(subreddit)_measures.csv"), result_df)
 end
-
-sample_topics!(comments, submissions, suffix, Ws, hs, full_hs; optim_init=[.6,.6,.6])
-export_boxplot(full_hs, joinpath(result_dir, "homophily.csv"))
-create_alpha_table(topics, suffix, MCMC_PATH, result_dir)
-
-suffix="linear"
-sample_topics!(comments, submissions, suffix, Ws, hs; result_dir=missing)
-
-result_df.W = [Ws[row.topic][row.type] for row in eachrow(result_df)]
-result_df.h = [hs[row.topic][row.type] for row in eachrow(result_df)]
-CSV.write(joinpath(result_dir, "measures.csv"), result_df)
 
