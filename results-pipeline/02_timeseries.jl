@@ -97,9 +97,9 @@ isdir(path) || mkdir(path)
 for subreddit in subreddits
     for topic in topics
         pd = get_activity(comments, submissions, topic, subreddit; start_date, end_date, windowsize)
-        CSV.write(joinpath(path, "$(topic)_$(subreddit).csv"), pd[!,[:date, :nb_posts]])
+        CSV.write(joinpath(path, "$(subreddit)_$(topic).csv"), pd[!,[:date, :nb_posts]])
         trend = get_trend(pd, keydates[topic].date; start_date, end_date)
-        CSV.write(joinpath(path, "$(topic)_$(subreddit)_trend.csv"), trend)
+        CSV.write(joinpath(path, "$(subreddit)_$(topic)_trend.csv"), trend)
     end
 end
 
