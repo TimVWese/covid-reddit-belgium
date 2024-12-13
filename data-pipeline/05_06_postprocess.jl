@@ -101,8 +101,10 @@ handle_df!(submissions)
 add_depth!(comments)
 cascade_topics!(comments, submissions)
 
-SQLite.load!(comments, output_db, "comment", on_conflict="REPLACE")
-SQLite.load!(submissions, output_db, "submission", on_conflict="REPLACE")
+DBInterface.execute(output_db, "DROP TABLE IF EXISTS comment")
+SQLite.load!(comments, output_db, "comment")
+DBInterface.execute(output_db, "DROP TABLE IF EXISTS submission")
+SQLite.load!(submissions, output_db, "submission")
 
 function get_number(db_loc, table, start_date, end_date)
     db = SQLite.DB(joinpath("data", db_loc))

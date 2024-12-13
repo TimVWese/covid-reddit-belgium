@@ -79,7 +79,7 @@ def get_processed_text(table, db_path):
 def add_transformers_models(db_path, output_path , device=-1,
                             tables=["comment", "submission"],
                             start_point=0, end_point=None,
-                            batch_size=1000, commit_every=50, back_up_every=250):
+                            batch_size=1000, back_up_every=250):
     for table in tables:
         docs = get_processed_text(table, db_path)
         classifier = Classifier(len(docs), device=device)
@@ -103,10 +103,8 @@ def add_transformers_models(db_path, output_path , device=-1,
             handled = batch_end
 
             count += 1
-            if count % commit_every == 0:
-                classifier.store(output_path+"_"+table)
             if count % back_up_every == 0:
-                classifier.store(output_path+"_"+table+"_"+str(handled))
+                classifier.store(output_path+table)
 
         classifier.store(output_path+table+"_final")
     return
@@ -120,4 +118,5 @@ def main_structured_topics(db_path, output_path):
     add_transformers_models(db_path, output_path, device=device, tables=tables, start_point=start_point, end_point=end_point)
     return
 
+os.makedirs(output_path, exist_ok=True)
 main_structured_topics(db_path, output_path)

@@ -236,7 +236,7 @@ def append_submission_id(database_location):
         while True:
             cursor.execute("SELECT parent_id FROM comment WHERE id = ?", (path[-1],))
             parent_id = cursor.fetchone()
-            if parent_id is None or parent_id[0] is None: # cul-de-sac; we'll never know
+            if parent_id is None or parent_id[0] is None or len(parent_id[0].split("_")) != 2: # cul-de-sac; we'll never know
                 submission_id = None
                 break
             prefix, parent_id = parent_id[0].split("_")
