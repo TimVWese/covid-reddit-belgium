@@ -11,13 +11,13 @@ using RollingFunctions
 include(joinpath(@__DIR__, "..", "util.jl"))
 
 # Allow to interpret some more dates to improve fitting at boundaries
-MCMC_PATH = joinpath(@__DIR__, "..", "mcmc-chains")
+MCMC_DIR = joinpath(@__DIR__, "..", "mcmc-chains")
+SIEBC_DIR = joinpath(RESULT_DIR, "05_siebc")
 broad_date_range=Date(2019,11,1):Date(2022,8,31)
 date_range = Date(2020, 1, 1):Date(2022, 6, 30)
 subreddits = ["belgium"]
 topics = [lockdown, mask, vaccin]
-nb_comment_threshold = 40
-result_dir = joinpath(RESULT_DIR, "05_siebc")
+nb_comment_threshold = 50
 
 comments, submissions = get_comments_and_submissions(; discard=Dict(:author=>[AUTHOR_AUTO, AUTHOR_DELETE]), date_range=broad_date_range)
 
@@ -150,10 +150,10 @@ function process(focal_user, comments; type=:logistic, N_samples_per=500, N_para
 end
 
 function handle(comments, submissions, topic, threshold; type=:logistic, N_samples_per=500,
-                N_parallel_in=6, N_parallel_out=5, save_suffix="", mcmc_path=MCMC_PATH)
+                N_parallel_in=6, N_parallel_out=5, save_suffix="", mcmc_dir=MCMC_DIR)
     a_coms, _ = get_author_comments(comments, submissions, topic, threshold)
     save_suffix = save_suffix * "_" * string(type)
-    save_dir = joinpath(mcmc_path, "$(topic)$(save_suffix)/")
+    save_dir = joinpath(mcmc_dir, "$(topic)$(save_suffix)/")
     !isdir(save_dir) && mkpath(save_dir)
 
     authors = unique(a_coms.author)
@@ -176,12 +176,12 @@ function handle(comments, submissions, topic, threshold; type=:logistic, N_sampl
 end
 
 for subreddit in subreddits
-    output_path = joinpath(MCMC_PATH, subreddit)
+    output_dir = joinpath(MCMC_DIR, subreddit)
     sub_coms = comments[comments.subreddit .== subreddit, :]
     sub_subs = submissions[submissions.subreddit .== subreddit, :]
     for topic in topics
-        handle(sub_coms, sub_subs, topic, nb_comment_threshold; type=:logistic, mcmc_path=output_path)
-        handle(sub_coms, sub_subs, topic, nb_comment_threshold; type=:linear, mcmc_path=output_path)
+        handle(sub_coms, sub_subs, topic, nb_comment_threshold; type=:logistic, mcmc_dir=output_dir)
+        handle(sub_coms, sub_subs, topic, nb_comment_threshold; type=:linear, mcmc_dir=output_dir)
     end
 end
 
@@ -195,10 +195,9 @@ function order_chain(chain)
     return hcat([Array(chain[sym])[:] for sym in all_syms]...)
 end
 
-function get_comments_and_chains(comments, topic, suffix, mcmc_path=MCMC_PATH)
+function get_comments_and_chains(comments, data_dir)
     comments = comments[:, [:id, :author, :parent_id, :parent_author, :bert, :parent_bert]]
     authors = unique(comments.author)
-    data_dir = joinpath(mcmc_path, "$(topic)_$(suffix)")
     available_authors = [s[1:end-5] for s in readdir(data_dir) if occursin(".jld2", s)]
     @assert all([author in available_authors for author in authors]) &&
         all([author in authors for author in available_authors])
@@ -271,9 +270,9 @@ Interpret the data from comments and perform statistical analysis.
 This function processes the comments data, ensuring that all authors have corresponding MCMC chains available.
 It then samples trajectories from these chains and performs statistical analysis to compute diagonalness scores and collect all sampled sentences.
 """
-function interpret_data(comments, topic; σ_mult=1., p_val=0.05, N_samples=nothing, suffix="")
-    comments, chains, a2idx = get_comments_and_chains(comments, topic, suffix)
-    type = infer_type(suffix)
+function interpret_data(comments, data_dir; σ_mult=1., p_val=0.05, N_samples=nothing)
+    comments, chains, a2idx = get_comments_and_chains(comments, data_dir)
+    type = infer_type(data_dir)
 
     selector = (chains, _) -> [rand(eachrow(chain)) for chain in chains]
     if N_samples == nothing
@@ -290,7 +289,7 @@ function interpret_data(comments, topic; σ_mult=1., p_val=0.05, N_samples=nothi
     @showprogress for i in 1:N_samples
         random_data = sample_trajectory!(comments, a2idx, selector(chains, i); σ_mult, type)
         mean_internal += comments.internal
-        D, diff = hist_and_diff(comments.sent, comments.parent_sent, random_data)
+        D, diff = hist_and_diff(comments.sent, comments.parent_sent, random_data; p_val)
 
         hs[i] = diagonalness(diff)
         all_sents[(i-1)*size(comments, 1)+1:i*size(comments, 1)] = comments.sent
@@ -329,7 +328,7 @@ function get_histogram(observed, predicted; filename=missing, width=0.05)
     return df
 end
 
-function construct_sigma_loss(all_comments, all_submissions, suffix; threshold=40, N_samples=25, topics = [lockdown, mask, vaccin], seed=1234)
+function construct_sigma_loss(all_comments, all_submissions, mcmc_dir, suffix; threshold=40, N_samples=25, topics = [lockdown, mask, vaccin], seed=1234)
     comments = Dict()
     chain_samples = Dict()
     a2idx = Dict()
@@ -338,7 +337,7 @@ function construct_sigma_loss(all_comments, all_submissions, suffix; threshold=4
 
     for topic in topics
         a_coms, _ = get_author_comments(all_comments, all_submissions, topic, threshold)
-        comments[topic], chains, a2idx[topic] = get_comments_and_chains(a_coms, topic, suffix)
+        comments[topic], chains, a2idx[topic] = get_comments_and_chains(a_coms, joinpath(mcmc_dir, "$(topic)_$(suffix)"))
         chain_samples[topic] = [[rand(eachrow(chain)) for chain in chains] for _ in 1:N_samples]
         all_sents[topic] = Vector{Float64}(undef, size(comments[topic], 1)*N_samples)
     end
@@ -364,20 +363,22 @@ end
 
 function sample_topics!(
         comments, submissions, suffix, subreddit, Ws, hs, full_hs=nothing; N_samples=nothing,
-        topics=topics, threshold=nb_comment_threshold, result_dir=result_dir,
-        optim_init=[1.,1.,1.], optim_samples=250, optim_options=Optim.Options(iterations=100),
+        topics=topics, threshold=nb_comment_threshold, mcmc_dir=MCMC_DIR, result_dir=SIEBC_DIR,
+        optim_init=[1.,1.,1.], optim_samples=250, optim_options=Optim.Options(iterations=250, show_trace=true),
     )
     sub_coms = comments[comments.subreddit .== subreddit, :]
     sub_subs = submissions[submissions.subreddit .== subreddit, :]
 
-    sl = construct_sigma_loss(sub_coms, sub_subs, suffix; N_samples=optim_samples, topics, threshold)
+    subreddit_dir = joinpath(mcmc_dir, subreddit)
+    sl = construct_sigma_loss(sub_coms, sub_subs, subreddit_dir, suffix; N_samples=optim_samples, topics, threshold)
     σ_opt = optimize(sl, optim_init, NelderMead(), optim_options)
 
     Threads.@threads for t_idx in eachindex(topics)
         topic = topics[t_idx]
         a_coms, a_subs = get_author_comments(sub_coms, sub_subs, topic, nb_comment_threshold)
         @info "Processing $(topic): $(length(unique(a_coms.author))) authors that made $(nrow(a_coms)) comments."
-        sample_hs, sents, interns, diff = interpret_data(a_coms, topic; N_samples, suffix, σ_mult= σ_opt.minimizer[t_idx])
+        data_dir = joinpath(subreddit_dir, "$(topic)_$(suffix)")
+        sample_hs, sents, interns, diff = interpret_data(a_coms, data_dir; N_samples, σ_mult= σ_opt.minimizer[t_idx])
         hist = get_histogram(a_coms.bert, sents; filename=(ismissing(result_dir) ? missing : joinpath(result_dir, "$(subreddit)_$(topic)_histogram.csv")))
         (!ismissing(result_dir)) && get_state_evolution(a_coms, interns; write_path=joinpath(result_dir, "$(subreddit)_$(topic)_internal_state.csv"))
 
@@ -475,6 +476,8 @@ function get_state_evolution(comments, internals; q=.25, min_data=16, window=14,
     return ts, q1, ms, q2, obs
 end
 
+isdir(SIEBC_DIR) || mkpath(SIEBC_DIR)
+
 for subreddit in subreddits
     suffix = "logistic"
 
@@ -494,14 +497,14 @@ for subreddit in subreddits
     end
 
     sample_topics!(comments, submissions, suffix, subreddit, Ws, hs, full_hs; optim_init=[.6,.6,.6])
-    export_boxplot(full_hs, joinpath(result_dir, "$(subreddit)_homophily.csv"))
-    create_alpha_table(topics, suffix, joinpath(MCMC_PATH, subreddit), result_dir)
+    export_boxplot(full_hs, joinpath(SIEBC_DIR, "$(subreddit)_homophily.csv"))
+    create_alpha_table(topics, suffix, joinpath(MCMC_DIR, subreddit), SIEBC_DIR)
 
     suffix="linear"
     sample_topics!(comments, submissions, suffix, subreddit, Ws, hs; result_dir=missing)
 
     result_df.W = [Ws[row.topic][row.type] for row in eachrow(result_df)]
     result_df.h = [hs[row.topic][row.type] for row in eachrow(result_df)]
-    CSV.write(joinpath(result_dir, "$(subreddit)_measures.csv"), result_df)
+    CSV.write(joinpath(SIEBC_DIR, "$(subreddit)_measures.csv"), result_df)
 end
 
