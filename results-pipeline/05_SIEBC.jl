@@ -17,7 +17,7 @@ broad_date_range=Date(2019,11,1):Date(2022,8,31)
 date_range = Date(2020, 1, 1):Date(2022, 6, 30)
 subreddits = ["belgium"]
 topics = [lockdown, mask, vaccin]
-nb_comment_threshold = 50
+nb_comment_threshold = 40
 
 comments, submissions = get_comments_and_submissions(; discard=Dict(:author=>[AUTHOR_AUTO, AUTHOR_DELETE]), date_range=broad_date_range)
 
