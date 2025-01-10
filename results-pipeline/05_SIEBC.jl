@@ -362,7 +362,7 @@ function construct_sigma_loss(all_comments, all_submissions, mcmc_dir, suffix; t
 end
 
 function sample_topics!(
-        comments, submissions, suffix, subreddit, Ws, hs, full_hs=nothing; N_samples=nothing,
+        comments, submissions, suffix, subreddit, Ws, hs, Ns, full_hs=nothing; N_samples=nothing,
         topics=topics, threshold=nb_comment_threshold, mcmc_dir=MCMC_DIR, result_dir=SIEBC_DIR,
         optim_init=[1.,1.,1.], optim_samples=250, optim_options=Optim.Options(iterations=250, show_trace=true),
     )
@@ -385,6 +385,7 @@ function sample_topics!(
         Ws[topic][suffix] = earthmoverdistance(hist.y_obs, hist.y_pred)
         hs[topic][suffix] = median(sample_hs)
         hs[topic]["observed"] = get_observed_homophily(a_coms, a_subs)
+        Ns[topic] = (length(unique(a_coms.author)), nrow(a_coms))
         (!isnothing(full_hs)) && (full_hs[topic] = sample_hs)
     end
 end
@@ -398,8 +399,8 @@ function create_alpha_table(topics, suffix, mcmc_dir, result_dir; p_val=0.05)
     for topic in topics
         total_true = 0
         total_count = 0
-        α₁s = []
-        α₂s = []
+        α₁s = Float64[]
+        α₂s = Float64[]
         topic_dir = joinpath(mcmc_dir, "$(topic)_$(suffix)")
         test_per_user[topic] = []
         for f in readdir(topic_dir)
@@ -408,8 +409,8 @@ function create_alpha_table(topics, suffix, mcmc_dir, result_dir; p_val=0.05)
             total_true += count(chain[:,1] .< chain[:,2])
             total_count += size(chain, 1)
             push!(test_per_user[topic], MannWhitneyUTest(Float64.(chain[:,1]), Float64.(chain[:,2])))
-            push!(α₁s, mean(chain[:,1]))
-            push!(α₂s, mean(chain[:,2]))
+            push!(α₁s, 2*mean(chain[:,1])) # Convert to [-1, 1]
+            push!(α₂s, 2*mean(chain[:,2]))
         end
         prop_samp = total_true / total_count
         prop_users = count((α₁s .< α₂s) .&& (pvalue.(test_per_user[topic]) .< p_val)) / length(α₁s)
@@ -489,6 +490,7 @@ for subreddit in subreddits
     Ws = Dict()
     hs = Dict()
     full_hs = Dict()
+    Ns = Dict()
 
     for topic in topics
         Ws[topic] = Dict()
@@ -496,15 +498,16 @@ for subreddit in subreddits
         Ws[topic]["observed"] = 0.
     end
 
-    sample_topics!(comments, submissions, suffix, subreddit, Ws, hs, full_hs; optim_init=[.6,.6,.6])
+    sample_topics!(comments, submissions, suffix, subreddit, Ws, hs, Ns, full_hs; optim_init=[.6,.6,.6])
     export_boxplot(full_hs, joinpath(SIEBC_DIR, "$(subreddit)_homophily.csv"))
     create_alpha_table(topics, suffix, joinpath(MCMC_DIR, subreddit), SIEBC_DIR)
 
     suffix="linear"
-    sample_topics!(comments, submissions, suffix, subreddit, Ws, hs; result_dir=missing)
+    sample_topics!(comments, submissions, suffix, subreddit, Ws, hs, Ns; result_dir=missing)
 
+    result_df.nb_authors = [Ns[row.topic][1] for row in eachrow(result_df)]
+    result_df.nb_comments = [Ns[row.topic][2] for row in eachrow(result_df)]
     result_df.W = [Ws[row.topic][row.type] for row in eachrow(result_df)]
     result_df.h = [hs[row.topic][row.type] for row in eachrow(result_df)]
     CSV.write(joinpath(SIEBC_DIR, "$(subreddit)_measures.csv"), result_df)
 end
-

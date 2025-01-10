@@ -7,12 +7,12 @@ comments, submissions = get_comments_and_submissions(; discard=Dict(:author=>[])
 subreddits = ["belgium"]
 topics = [lockdown, mask, vaccin]
 path = joinpath(RESULT_DIR, "02_timeseries")
-start_date = Date(2020, 1, 1)
-end_date = Date(2022, 6, 30)
+start_date = minimum(DATE_RANGE)
+end_date = maximum(DATE_RANGE)
 windowsize = 14
 
 negative_day_thres = 50 # number of posts before a negative day is considered
-negative_day_quantile = 0.28 #quantile to use for negative day detection
+negative_day_quantile = 0.275 #quantile to use for negative day detection
 
 keydates = Dict([
     vaccin => DataFrame([
@@ -92,7 +92,30 @@ function identify_negative_days(comments, topic, subreddit; language="en", senti
     return pd.date[pd[!,:w_sent] .< w_sent_lb .&& pd.num .> threshold]
 end
 
+function get_title(submissions, submission_id)
+    idx = findfirst(isequal(submission_id), submissions.id)
+    return idx !== nothing ? submissions.title[idx] : ""
+end
+
+function get_negative_posts(comments, submissions, topic, subreddit, date; language="en", sentiment_col=:bert, nb=10)
+    selection = comments[comments.topic .== topic .&& comments.subreddit .== subreddit .&&
+        select_lang(comments, language) .&& comments.date .== date,:]
+    valid = remove_invalid_rows(selection, [sentiment_col, ])
+    valid.w_sent = valid.score .* valid[!, sentiment_col]
+    negative_posts = DataFrame(
+        date=Date[], submission_id=String[], comment_id=String[], title=String[],
+        body=String[], score=Float64[], sent=Float64[], w_sent=Float64[]
+    )
+    sort!(valid, :w_sent)
+    for i in 1:nb
+        push!(negative_posts, Tuple(valid[i, [:date, :submission_id, :id, :author, :body, :score, sentiment_col, :w_sent]]))
+        negative_posts[end, :title] = get_title(submissions, negative_posts[end, :submission_id])
+    end
+    return negative_posts
+end
+
 isdir(path) || mkdir(path)
+isdir(joinpath(path, "negative-days")) || mkdir(joinpath(path, "negative-days"))
 
 for subreddit in subreddits
     for topic in topics
@@ -103,11 +126,15 @@ for subreddit in subreddits
     end
 end
 
-open(joinpath(path, "negative_days.csv"), "w") do f
+open(joinpath(path, "negative-days", "00_summary.csv"), "w") do f
     for subreddit in subreddits
         for topic in topics
             neg_days = identify_negative_days(comments, topic, subreddit; q=negative_day_quantile, threshold=negative_day_thres)
             println(f, "$subreddit,$(topic): "*join(neg_days, ", "))
+            for date in neg_days
+                neg_posts = get_negative_posts(comments, submissions, topic, subreddit, date)
+                CSV.write(joinpath(path, "negative-days", "$subreddit-$(topic)-$(date).csv"), neg_posts)
+            end
         end
     end
 end
