@@ -155,18 +155,6 @@ function get_differences(comments, submissions, context_size; p_val=0.05, os=50,
     return reshape(sents, sz), reshape(diffs, sz)
 end
 
-function export_as_index_list(D, filename)
-    step = 2. / (size(D, 1) - 1.)
-    xs = -1:step:1
-    ys = -1:step:1
-    @assert length(xs) == size(D, 1)
-    @assert length(ys) == size(D, 2)
-    df = DataFrame(x = [xs[i] for i in axes(D, 1) for j in axes(D, 2)],
-                   y = [ys[j] for i in axes(D, 1) for j in axes(D, 2)],
-                   z = [D[j, i] for i in axes(D, 1) for j in axes(D, 2)])
-    CSV.write(filename, df)
-end
-
 function generate_heatmaps(comments, submissions, topics, signals)
     result = Dict()
     for (n_topic, s_topic) in topics

@@ -123,6 +123,7 @@ for subreddit in subreddits
         CSV.write(joinpath(path, "$(subreddit)_$(topic).csv"), pd[!,[:date, :nb_posts]])
         trend = get_trend(pd, keydates[topic].date; start_date, end_date)
         CSV.write(joinpath(path, "$(subreddit)_$(topic)_trend.csv"), trend)
+        @info "$(subreddit) $(topic) maximum: $(maximum(pd.nb_posts)) at $(pd.date[argmax(pd.nb_posts)]) ($(maximum(pd.nb_posts) / mean(pd.nb_posts)) x mean)"
     end
 end
 

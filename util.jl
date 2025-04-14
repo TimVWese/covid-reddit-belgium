@@ -267,7 +267,7 @@ function get_random_histogram(d1, d2; width=0.05)
     r2 = h2.weights ./ (width*sum(h2.weights))
     R = r1*r2'
 
-    return R'
+    return R
 end
 
 function get_structured_histogram(d1, d2; width=0.05)
@@ -277,7 +277,7 @@ function get_structured_histogram(d1, d2; width=0.05)
     HD = fit(Histogram, (d1,d2), (bins, bins))
     D = HD.weights ./ (width^2 * sum(HD.weights))
 
-    return D'
+    return D
 end
 
 function get_2d_diff(D, R_f; N=50)
@@ -322,4 +322,22 @@ function diagonalness(D::Matrix{Float64})
     @assert length(ys) == size(D, 2)
     f = (x, y) -> 1 - 2 * abs(x - y)
     return sum(D[i, j] * (step^2) * f(xs[i], ys[j]) for i in axes(D, 1) for j in axes(D, 2))
+end
+
+
+"""
+    export_as_index_list(D, filename)
+
+Export a 2D matrix as a list of indices and values.
+"""
+function export_as_index_list(D, filename)
+    step = 2. / (size(D, 1) - 1.)
+    xs = -1:step:1
+    ys = -1:step:1
+    @assert length(xs) == size(D, 1)
+    @assert length(ys) == size(D, 2)
+    df = DataFrame(x = [xs[i] for i in axes(D, 1) for j in axes(D, 2)],
+                   y = [ys[j] for i in axes(D, 1) for j in axes(D, 2)],
+                   z = [D[i,j] for i in axes(D, 1) for j in axes(D, 2)])
+    CSV.write(filename, df)
 end

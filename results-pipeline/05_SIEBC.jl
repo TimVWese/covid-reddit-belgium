@@ -346,6 +346,9 @@ function construct_sigma_loss(all_comments, all_submissions, mcmc_dir, suffix; t
         if length(σ_exps) == 1 && length(topics) >1
             σ_exps = fill(σ_exps[1], length(topics))
         end
+        if any(σ_exps .<= 0.)
+            return Inf
+        end
         W = 0.
         Random.seed!(seed)
         for (t_idx, topic) in enumerate(topics)
@@ -409,15 +412,16 @@ function create_alpha_table(topics, suffix, mcmc_dir, result_dir; p_val=0.05)
             total_true += count(chain[:,1] .< chain[:,2])
             total_count += size(chain, 1)
             push!(test_per_user[topic], MannWhitneyUTest(Float64.(chain[:,1]), Float64.(chain[:,2])))
-            push!(α₁s, 2*mean(chain[:,1])) # Convert to [-1, 1]
-            push!(α₂s, 2*mean(chain[:,2]))
+            push!(α₁s, mean(chain[:,1]))
+            push!(α₂s, mean(chain[:,2]))
         end
         prop_samp = total_true / total_count
         prop_users = count((α₁s .< α₂s) .&& (pvalue.(test_per_user[topic]) .< p_val)) / length(α₁s)
         full_tests[topic] = MannWhitneyUTest(Float64.(α₁s), Float64.(α₂s))
 
-        @printf output "%s && \\( %0.5f \\pm %0.5f \\) & \\( %0.5f \\pm %0.5f \\) & %0.5f \\\\\n" string(topic) mean(α₁s) std(α₁s) mean(α₂s) std(α₂s) prop_users
+        @printf output "\\topic{%s} & \\( %0.5f \\pm %0.5f \\) & \\( %0.5f \\pm %0.5f \\) & %0.5f \\\\\n" uppercasefirst(string(topic)) mean(α₁s) std(α₁s) mean(α₂s) std(α₂s) prop_users
     end
+    @printf output "\\end{tabular}\n"
     close(output)
     return full_tests, test_per_user
 end

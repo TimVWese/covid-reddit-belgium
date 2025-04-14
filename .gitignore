@@ -10,4 +10,4 @@ Manifest.toml
 
 data
 results
-mcmc-chains
+mcmc-chains*
