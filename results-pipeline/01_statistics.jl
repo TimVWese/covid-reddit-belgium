@@ -48,12 +48,14 @@ for subreddit in subreddits
         ds = sort(setdiff(unique(users[!, col]), [0]))
         counts = [count(x->x==d, users[!, col]) for d in ds]
         df = DataFrame(:ds=>ds, :counts=>counts)
-        params, KS = estimate_parameters(users[users[!, col] .> 0, col], DiscretePowerLaw, xmins=1:10)
-        α = params.α
-        A = df.counts[10] / (df.ds[10]^(-1. *α))
-        df.fit = A*(df.ds.^(-1. * α))
-        CSV.write(joinpath(path, "$(subreddit)_$(topic).csv"), df)
-        push!(fit, (string(topic), α, params.θ, KS))
+        for xmins in [[1,], 1:10]
+            params, KS = estimate_parameters(users[users[!, col] .> 0, col], DiscretePowerLaw, xmins=xmins)
+            α = params.α
+            A = df.counts[10] / (df.ds[10]^(-1. *α))
+            df.fit = A*(df.ds.^(-1. * α))
+            CSV.write(joinpath(path, "$(subreddit)_$(topic)_$(params.θ).csv"), df)
+            push!(fit, (string(topic), α, params.θ, KS))
+        end
     end
 
     CSV.write(joinpath(path, "$(subreddit)_fit_info.csv"), fit)
