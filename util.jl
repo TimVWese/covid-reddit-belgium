@@ -306,10 +306,10 @@ end
 
 Calculate the structured histogram and the difference between the observed and random data.
 """
-function hist_and_diff(base_data, observed_data, random_data; p_val=nothing, i=1, os=5)
+function hist_and_diff(base_data, observed_data, random_data; width=0.05, p_val=nothing, i=1, os=5)
     rd_func = (n) -> mean_sampling(random_data, i; nb_samples=n)
-    Rd_func = () -> get_random_histogram(base_data, rd_func(size(base_data, 1)))
-    D = get_structured_histogram(base_data, observed_data)
+    Rd_func = () -> get_random_histogram(base_data, rd_func(size(base_data, 1)); width)
+    D = get_structured_histogram(base_data, observed_data; width)
     diff =  isnothing(p_val) ? get_2d_diff(D, Rd_func; N=20*os)[1] : get_2d_diff(D, Rd_func, p_val; os)
     return D, diff
 end
@@ -323,7 +323,6 @@ function diagonalness(D::Matrix{Float64})
     f = (x, y) -> 1 - 2 * abs(x - y)
     return sum(D[i, j] * (step^2) * f(xs[i], ys[j]) for i in axes(D, 1) for j in axes(D, 2))
 end
-
 
 """
     export_as_index_list(D, filename)

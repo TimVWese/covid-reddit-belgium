@@ -136,7 +136,7 @@ function add_both_contexts!(comments, submissions, context_size; all_comments=co
     end
 end
 
-function get_differences(comments, submissions, context_size; p_val=0.05, os=50, signal="bert", contexts=contexts)
+function get_differences(comments, submissions, context_size; width=0.05, p_val=0.05, os=50, signal="bert", contexts=contexts)
     submissions = submissions[ein(submissions.id, comments.submission_id), :]
     random_data = vcat(comments[!,signal], submissions[!,signal])
 
@@ -145,7 +145,7 @@ function get_differences(comments, submissions, context_size; p_val=0.05, os=50,
     for context in contexts
         for i in 1:context_size
             col2 = "$(context)_$(i)_" * signal
-            D, diff = hist_and_diff(comments[!,signal], comments[!,col2], random_data; i, p_val, os)
+            D, diff = hist_and_diff(comments[!,signal], comments[!,col2], random_data; width, p_val, i, os)
             push!(sents, D)
             push!(diffs, diff)
         end
@@ -155,7 +155,7 @@ function get_differences(comments, submissions, context_size; p_val=0.05, os=50,
     return reshape(sents, sz), reshape(diffs, sz)
 end
 
-function generate_heatmaps(comments, submissions, topics, signals)
+function generate_heatmaps(comments, submissions, topics, signals; width=0.05, p_val=0.05, os=50)
     result = Dict()
     for (n_topic, s_topic) in topics
         result[n_topic] = Dict()
@@ -167,7 +167,7 @@ function generate_heatmaps(comments, submissions, topics, signals)
             cb = remove_invalid_rows(cb, [n_model, "parent_$(n_model)"])
             sb = remove_invalid_rows(sb, [n_model])
             random_data = vcat(cb[!,n_model], sb[!,n_model])
-            sent, diff = hist_and_diff(cb[!,n_model], cb[!, "parent_$(n_model)"], random_data; p_val=0.05)
+            sent, diff = hist_and_diff(cb[!,n_model], cb[!, "parent_$(n_model)"], random_data; width, p_val, os)
             result[n_topic][n_model] = Dict()
             result[n_topic][n_model][:sent] = sent
             result[n_topic][n_model][:diff] = diff
@@ -206,9 +206,33 @@ function handle_contexts(comments, submissions, topics, signals, n)
     return result
 end
 
+function width_sensitivity(comments, submissions, topics, signals; widths=[0.1, 0.05, 0.025], p_val=0.05, os=50)
+    result = DataFrame(widths = widths)
+    for (n_topic, s_topic) in topics
+        for (n_model, s_model) in signals
+            lang_comments = comments[s_model.(eachrow(comments)), :]
+            cb = lang_comments[s_topic.(eachrow(lang_comments)), :]
+            sb = submissions[ein(submissions.id, cb.submission_id), :]
+            add_parent_values!(cb, sb; all_comments=lang_comments, cols=[n_model,])
+            cb = remove_invalid_rows(cb, [n_model, "parent_$(n_model)"])
+            sb = remove_invalid_rows(sb, [n_model])
+            random_data = vcat(cb[!,n_model], sb[!,n_model])
+            hs = Float64[]
+            for width in widths
+                _, diff = hist_and_diff(cb[!,n_model], cb[!, "parent_$(n_model)"], random_data; width, p_val, os)
+                push!(hs, diagonalness(diff))
+            end
+            result[!, "h_$(n_topic)_$(n_model)"] = hs
+            result[!, "dh_$(n_topic)_$(n_model)"] = (hs .- hs[end]) ./ hs[end]
+        end
+    end
+    return result
+end
+
 isdir(path) || mkdir(path)
 
 for subreddit in subreddits
+    ## Initialization
     comments_sub = comments[comments.subreddit .== subreddit, :]
     submissions_sub = submissions[ein(submissions.id, comments_sub.submission_id), :]
 
@@ -217,6 +241,7 @@ for subreddit in subreddits
     other_info.model = vcat(fill([signal[1] for signal in signals], length(topics))...)
     pair_to_row = Dict((other_info.topic[r] => other_info.model[r]) => r for r in 1:nrow(other_info))
 
+    ## HEATMAP GENERATION
     heatmaps = generate_heatmaps(comments_sub, submissions_sub, topics, signals)
     Ns_users_full = Array{Int64, 1}(undef, nrow(other_info))
     Ns_comments_full = Array{Int64, 1}(undef, nrow(other_info))
@@ -234,6 +259,7 @@ for subreddit in subreddits
     other_info.N_comments_full = Ns_comments_full
     other_info.h_full = hs_full
 
+    ## CONTEXT EVALUATION
     result = handle_contexts(comments_sub, submissions_sub, topics, signals, n)
     N_users_context = Array{Int64, 1}(undef, nrow(other_info))
     N_comments_context = Array{Int64, 1}(undef, nrow(other_info))
@@ -250,6 +276,10 @@ for subreddit in subreddits
     other_info.N_comments_context = N_comments_context
     other_info.h_context = hs_context
 
+    ## WIDTH SENSITIVITY
+    widths = [0.1, 0.05, 0.025]
+    ws = width_sensitivity(comments_sub, submissions_sub, topics, signals; widths)
+
+    CSV.write(joinpath(path, "$(subreddit)_width_sensitivity.csv"), ws)
     CSV.write(joinpath(path, "$(subreddit)_other_info.csv"), other_info)
 end
-
