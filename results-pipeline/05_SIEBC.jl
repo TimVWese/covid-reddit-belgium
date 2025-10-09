@@ -312,6 +312,14 @@ function earthmoverdistance(a::Vector, b::Vector; width = 0.05)
     return width*sum( abs, cumsum( a ) .- cumsum( b ) )
 end
 
+function KS_distance(a::Vector, b::Vector)
+    ecdf_a = ecdf(Float64.(skipmissing(a)))
+    ecdf_b = ecdf(Float64.(skipmissing(b)))
+    eval_points = sort(union(a, b))
+    @assert ecdf_a(1.) == 1. && ecdf_b(1.) == 1.
+    return maximum(abs.(ecdf_a.(eval_points) .- ecdf_b.(eval_points)))
+end
+
 function get_histogram(observed, predicted; filename=missing, width=0.05)
     to_weights = (data) -> begin
         hist = fit(Histogram, data, (-1-width/2):width:(1+width/2))
@@ -323,6 +331,7 @@ function get_histogram(observed, predicted; filename=missing, width=0.05)
     df = DataFrame(x=xs, y_obs=y_obs, y_pred=y_pred)
     if !ismissing(filename)
         @info "Wassertein distance for $(split(filename, "/")[end]): $(earthmoverdistance(y_obs, y_pred; width=width))"
+        @info "KS distance for $(split(filename, "/")[end]): $(KS_distance(observed, predicted))"
         CSV.write(filename, df)
     end
     return df
