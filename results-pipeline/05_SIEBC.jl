@@ -87,6 +87,27 @@ end
     end
 end
 
+@model function fit_bc_stateless(comments::Vector{T}, parents, replies; type=:logistic) where T
+    α ~ Exponential(.5)
+    ϵ ~ Uniform(0., 1.)
+    bc = bc_kernel(; α, ϵ, type)
+
+    initial_state ~ Uniform(0., 1.)
+    σ ~ Exponential(.25)
+
+    current_state = initial_state
+    for t in axes(comments, 1)
+        c = bc(current_state, parents[t])
+        comments[t] ~ truncated(Normal(c, σ); lower=0., upper=1.)
+        if t == size(comments, 1)
+            break
+        end
+        for r in replies[t]
+            current_state = bc(current_state, r)
+        end
+    end
+end
+
 """
     get_author_comments(comments, submissions, topic; threshold=50, extended=false)
 
@@ -132,10 +153,10 @@ function retrieve_data(user::AbstractString, selected_comments::DataFrame, refer
     return Cs, Tuple(Ps), Tuple(Rs)
 end
 
-function process(focal_user, comments; type=:logistic, N_samples_per=500, N_parallel_in=6, save_dir=nothing)
+function process(focal_user, comments; model_type=:internal, type=:logistic, N_samples_per=500, N_parallel_in=6, save_dir=nothing)
     Cs, Ps, Rs = retrieve_data(focal_user, comments, comments)
 
-    model = fit_bc(Cs, Ps, Rs; type)
+    model = model_type == :stateless ? fit_bc_stateless(Cs, Ps, Rs; type) : fit_bc(Cs, Ps, Rs; type)
     chain = sample(model, NUTS(;adtype=AutoReverseDiff()), MCMCThreads(), N_samples_per, N_parallel_in)
     if !isnothing(save_dir)
         try
@@ -149,10 +170,11 @@ function process(focal_user, comments; type=:logistic, N_samples_per=500, N_para
     return chain
 end
 
-function handle(comments, submissions, topic, threshold; type=:logistic, N_samples_per=500,
+function handle(comments, submissions, topic, threshold; model_type=:internal, type=:logistic, N_samples_per=500,
                 N_parallel_in=6, N_parallel_out=5, save_suffix="", mcmc_dir=MCMC_DIR)
     a_coms, _ = get_author_comments(comments, submissions, topic, threshold)
     save_suffix = save_suffix * "_" * string(type)
+    (model_type == :stateless) && (save_suffix *= "_stateless")
     save_dir = joinpath(mcmc_dir, "$(topic)$(save_suffix)/")
     !isdir(save_dir) && mkpath(save_dir)
 
@@ -164,7 +186,7 @@ function handle(comments, submissions, topic, threshold; type=:logistic, N_sampl
         return
     end
     process(
-        authors[idx], a_coms; type, N_samples_per, N_parallel_in, save_dir
+        authors[idx], a_coms; model_type, type, N_samples_per, N_parallel_in, save_dir
     )
     next!(pb)
     end
@@ -182,14 +204,19 @@ for subreddit in subreddits
     for topic in topics
         handle(sub_coms, sub_subs, topic, nb_comment_threshold; type=:logistic, mcmc_dir=output_dir)
         handle(sub_coms, sub_subs, topic, nb_comment_threshold; type=:linear, mcmc_dir=output_dir)
+        handle(sub_coms, sub_subs, topic, nb_comment_threshold; model_type=:stateless, type=:logistic, N_samples_per=100, mcmc_dir=output_dir)
     end
 end
 
 #################
 # Interpretation
 #################
-function order_chain(chain)
-    parameter_syms = [:ϵ, :α₁, :α₂, :σ₁, :σ₂]
+function order_chain(chain; model_type=:internal)
+    if model_type == :stateless
+        parameter_syms = [:ϵ, :α, :σ, :initial_state]
+    else
+        parameter_syms = [:ϵ, :α₁, :α₂, :σ₁, :σ₂]
+    end
     state_syms = setdiff(chain.name_map.parameters, parameter_syms)
     all_syms = vcat(parameter_syms, state_syms)
     return hcat([Array(chain[sym])[:] for sym in all_syms]...)
@@ -202,7 +229,8 @@ function get_comments_and_chains(comments, data_dir)
     @assert all([author in available_authors for author in authors]) &&
         all([author in authors for author in available_authors])
     a2idx = Dict([author => idx for (idx, author) in enumerate(authors)])
-    chains = [order_chain(JLD2.load(joinpath(data_dir, "$(author).jld2"))["chain"]) for author in authors]
+    model_type = occursin("stateless", data_dir) ? :stateless : :internal
+    chains = [order_chain(JLD2.load(joinpath(data_dir, "$(author).jld2"))["chain"]; model_type) for author in authors]
 
     comments.sent = Vector{Union{Missing, Float64}}(missing, size(comments, 1))
     comments.parent_sent = Vector{Union{Missing, Float64}}(missing, size(comments, 1))
@@ -210,21 +238,31 @@ function get_comments_and_chains(comments, data_dir)
     return comments, chains, a2idx
 end
 
-function sample_trajectory!(comments, a2idx, chain_samples; k=25, σ_mult=1, type=:bell)
-    ϵ_idx, α₁_idx, α₂_idx, σ₁_idx, σ₂_idx = 1:5
-    state_offset = 5
-
-    bcs = [bc_kernel(; α=s[α₂_idx], ϵ=s[ϵ_idx], type) for s in chain_samples]
-    σ₂s = [σ_mult*s[σ₂_idx] for s in chain_samples]
-    current_index = ones(Int64, length(chain_samples))
+function sample_trajectory!(comments, a2idx, chain_samples; σ_mult=1, type=:bell, model_type=:internal)
+    if model_type == :stateless
+        ϵ_idx, α_idx, σ_idx, initial_state_idx = 1:4
+        bcs = [bc_kernel(; α=s[α_idx], ϵ=s[ϵ_idx], type) for s in chain_samples]
+        σs = [σ_mult*s[σ_idx] for s in chain_samples]
+        current_states = [s[initial_state_idx] for s in chain_samples]
+    else
+        ϵ_idx, α₁_idx, α₂_idx, σ₁_idx, σ₂_idx = 1:5
+        state_offset = 5
+        bcs = [bc_kernel(; α=s[α₂_idx], ϵ=s[ϵ_idx], type) for s in chain_samples]
+        σ₂s = [σ_mult*s[σ₂_idx] for s in chain_samples]
+        current_index = ones(Int64, length(chain_samples))
+    end
 
     get_parents = ParentLookup(comments, comments[1:0,:])
     random_data = []
 
     get_internal_state = a_idx -> begin
-        cs_idx = state_offset + current_index[a_idx]
-        current_index[a_idx] += 1
-        return chain_samples[a_idx][cs_idx]
+        if model_type == :stateless
+            return current_states[a_idx]
+        else
+            cs_idx = state_offset + current_index[a_idx]
+            current_index[a_idx] += 1
+            return chain_samples[a_idx][cs_idx]
+        end
     end
 
     for comment in eachrow(comments)
@@ -237,7 +275,12 @@ function sample_trajectory!(comments, a2idx, chain_samples; k=25, σ_mult=1, typ
         comment.internal = author_state
         comment.sent = bcs[author_idx](author_state, parent_sent)
         comment.parent_sent = parent_sent
-        comment.sent = rand(truncated(Normal(comment.sent, σ₂s[author_idx]), 0., 1.))
+        
+        σ_val = model_type == :stateless ? σs[author_idx] : σ₂s[author_idx]
+        comment.sent = rand(truncated(Normal(comment.sent, σ_val), 0., 1.))
+        
+        # For stateless model, current_state is updated deterministically during MCMC fitting
+        # No need to update here during simulation
     end
 
     comments.sent = (2*comments.sent) .- 1
@@ -273,9 +316,10 @@ It then samples trajectories from these chains and performs statistical analysis
 function interpret_data(comments, data_dir; σ_mult=1., p_val=0.05, N_samples=nothing)
     comments, chains, a2idx = get_comments_and_chains(comments, data_dir)
     type = infer_type(data_dir)
+    model_type = occursin("stateless", data_dir) ? :stateless : :internal
 
     selector = (chains, _) -> [rand(eachrow(chain)) for chain in chains]
-    if N_samples == nothing
+    if isnothing(N_samples)
         N_samples = size(chains[1], 1)
         @assert all(chain -> size(chain, 1) == N_samples, chains)
         selector = (chains, idx) -> [chain[idx, :] for chain in chains]
@@ -287,7 +331,7 @@ function interpret_data(comments, data_dir; σ_mult=1., p_val=0.05, N_samples=no
     mean_diffs = zeros(Float64, (41, 41))
 
     @showprogress for i in 1:N_samples
-        random_data = sample_trajectory!(comments, a2idx, selector(chains, i); σ_mult, type)
+        random_data = sample_trajectory!(comments, a2idx, selector(chains, i); σ_mult, type, model_type)
         mean_internal += comments.internal
         D, diff = hist_and_diff(comments.sent, comments.parent_sent, random_data; p_val)
 
@@ -343,6 +387,7 @@ function construct_sigma_loss(all_comments, all_submissions, mcmc_dir, suffix; t
     a2idx = Dict()
     all_sents = Dict()
     type = infer_type(suffix)
+    model_type = occursin("stateless", suffix) ? :stateless : :internal
 
     for topic in topics
         a_coms, _ = get_author_comments(all_comments, all_submissions, topic, threshold)
@@ -363,7 +408,7 @@ function construct_sigma_loss(all_comments, all_submissions, mcmc_dir, suffix; t
         for (t_idx, topic) in enumerate(topics)
             t_coms = comments[topic]
             for (i, chain_sample) in enumerate(chain_samples[topic])
-                sample_trajectory!(t_coms, a2idx[topic], chain_sample; σ_mult=σ_exps[t_idx], type)
+                sample_trajectory!(t_coms, a2idx[topic], chain_sample; σ_mult=σ_exps[t_idx], type, model_type)
                 all_sents[topic][(i-1)*size(t_coms, 1)+1:i*size(t_coms, 1)] .= t_coms.sent
             end
             hist = get_histogram(t_coms.bert, all_sents[topic])
@@ -374,7 +419,7 @@ function construct_sigma_loss(all_comments, all_submissions, mcmc_dir, suffix; t
 end
 
 function sample_topics!(
-        comments, submissions, suffix, subreddit, Ws, hs, Ns, full_hs=nothing; N_samples=nothing,
+        comments, submissions, suffix, subreddit, Ws, KSs, hs, Ns, full_hs=nothing; N_samples=nothing,
         topics=topics, threshold=nb_comment_threshold, mcmc_dir=MCMC_DIR, result_dir=SIEBC_DIR,
         optim_init=[1.,1.,1.], optim_samples=250, optim_options=Optim.Options(iterations=250, show_trace=true),
     )
@@ -395,6 +440,7 @@ function sample_topics!(
         (!ismissing(result_dir)) && get_state_evolution(a_coms, interns; write_path=joinpath(result_dir, "$(subreddit)_$(topic)_internal_state.csv"))
 
         Ws[topic][suffix] = earthmoverdistance(hist.y_obs, hist.y_pred)
+        KSs[topic][suffix] = KS_distance(a_coms.bert, sents)
         hs[topic][suffix] = median(sample_hs)
         hs[topic]["observed"] = get_observed_homophily(a_coms, a_subs)
         Ns[topic] = (length(unique(a_coms.author)), nrow(a_coms))
@@ -495,32 +541,39 @@ isdir(SIEBC_DIR) || mkpath(SIEBC_DIR)
 for subreddit in subreddits
     suffix = "logistic"
 
-    types = ["observed", "logistic", "linear"]
+    types = ["observed", "logistic", "linear", "logistic_stateless"]
     result_df = DataFrame()
     result_df.topic = vcat([fill(topic, length(types)) for topic in topics]...)
     result_df.type = vcat([types for _ in topics]...)
 
     Ws = Dict()
+    KSs = Dict()
     hs = Dict()
     full_hs = Dict()
     Ns = Dict()
 
     for topic in topics
         Ws[topic] = Dict()
+        KSs[topic] = Dict()
         hs[topic] = Dict()
         Ws[topic]["observed"] = 0.
+        KSs[topic]["observed"] = 0.
     end
 
-    sample_topics!(comments, submissions, suffix, subreddit, Ws, hs, Ns, full_hs; optim_init=[.6,.6,.6])
+    sample_topics!(comments, submissions, suffix, subreddit, Ws, KSs, hs, Ns, full_hs; optim_init=[.6,.6,.6], optim_samples=50)
     export_boxplot(full_hs, joinpath(SIEBC_DIR, "$(subreddit)_homophily.csv"))
     create_alpha_table(topics, suffix, joinpath(MCMC_DIR, subreddit), SIEBC_DIR)
 
     suffix="linear"
-    sample_topics!(comments, submissions, suffix, subreddit, Ws, hs, Ns; result_dir=missing)
+    sample_topics!(comments, submissions, suffix, subreddit, Ws, KSs, hs, Ns; result_dir=missing, optim_samples=50)
+
+    suffix="logistic_stateless"
+    sample_topics!(comments, submissions, suffix, subreddit, Ws, KSs, hs, Ns; result_dir=missing, optim_samples=50)
 
     result_df.nb_authors = [Ns[row.topic][1] for row in eachrow(result_df)]
     result_df.nb_comments = [Ns[row.topic][2] for row in eachrow(result_df)]
     result_df.W = [Ws[row.topic][row.type] for row in eachrow(result_df)]
+    result_df.KS = [KSs[row.topic][row.type] for row in eachrow(result_df)]
     result_df.h = [hs[row.topic][row.type] for row in eachrow(result_df)]
     CSV.write(joinpath(SIEBC_DIR, "$(subreddit)_measures.csv"), result_df)
 end
