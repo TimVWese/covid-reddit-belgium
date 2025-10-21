@@ -356,6 +356,23 @@ function earthmoverdistance(a::Vector, b::Vector; width = 0.05)
     return width*sum( abs, cumsum( a ) .- cumsum( b ) )
 end
 
+function wasserstein_distance(a::Vector, b::Vector)
+    ecdf_a = ecdf(Float64.(skipmissing(a)))
+    ecdf_b = ecdf(Float64.(skipmissing(b)))
+    all_points = sort(union(a, b))
+    
+    # Calculate the W1 distance as integral of |F_a(x) - F_b(x)|
+    distance = 0.0
+    
+    for i in 1:(length(all_points)-1)
+        x1, x2 = all_points[i], all_points[i+1]
+        y1 = abs(ecdf_a(x1) - ecdf_b(x1))
+        distance += y1 * (x2 - x1)
+    end
+    
+    return distance
+end
+
 function KS_distance(a::Vector, b::Vector)
     ecdf_a = ecdf(Float64.(skipmissing(a)))
     ecdf_b = ecdf(Float64.(skipmissing(b)))
@@ -374,7 +391,8 @@ function get_histogram(observed, predicted; filename=missing, width=0.05)
     y_pred = to_weights(predicted)
     df = DataFrame(x=xs, y_obs=y_obs, y_pred=y_pred)
     if !ismissing(filename)
-        @info "Wassertein distance for $(split(filename, "/")[end]): $(earthmoverdistance(y_obs, y_pred; width=width))"
+        @info "EM distance for $(split(filename, "/")[end]): $(earthmoverdistance(y_obs, y_pred; width=width))"
+        @info "Wasserstein distance for $(split(filename, "/")[end]): $(wasserstein_distance(observed, predicted))"
         @info "KS distance for $(split(filename, "/")[end]): $(KS_distance(observed, predicted))"
         CSV.write(filename, df)
     end
@@ -403,7 +421,7 @@ function construct_sigma_loss(all_comments, all_submissions, mcmc_dir, suffix; t
         if any(σ_exps .<= 0.)
             return Inf
         end
-        W = 0.
+        KS = 0.
         Random.seed!(seed)
         for (t_idx, topic) in enumerate(topics)
             t_coms = comments[topic]
@@ -411,17 +429,16 @@ function construct_sigma_loss(all_comments, all_submissions, mcmc_dir, suffix; t
                 sample_trajectory!(t_coms, a2idx[topic], chain_sample; σ_mult=σ_exps[t_idx], type, model_type)
                 all_sents[topic][(i-1)*size(t_coms, 1)+1:i*size(t_coms, 1)] .= t_coms.sent
             end
-            hist = get_histogram(t_coms.bert, all_sents[topic])
-            W += earthmoverdistance(hist.y_obs, hist.y_pred)^2
+            KS += KS_distance(t_coms.bert, all_sents[topic])^2
         end
-        return sqrt(W)
+        return sqrt(KS)
     end
 end
 
 function sample_topics!(
-        comments, submissions, suffix, subreddit, Ws, KSs, hs, Ns, full_hs=nothing; N_samples=nothing,
+        comments, submissions, suffix, subreddit, EMs, Ws, KSs, hs, Ns, full_hs=nothing; N_samples=nothing,
         topics=topics, threshold=nb_comment_threshold, mcmc_dir=MCMC_DIR, result_dir=SIEBC_DIR,
-        optim_init=[1.,1.,1.], optim_samples=250, optim_options=Optim.Options(iterations=250, show_trace=true),
+        optim_init=[1.,1.,1.], optim_samples=300, optim_options=Optim.Options(iterations=300, show_trace=true),
     )
     sub_coms = comments[comments.subreddit .== subreddit, :]
     sub_subs = submissions[submissions.subreddit .== subreddit, :]
@@ -439,9 +456,10 @@ function sample_topics!(
         hist = get_histogram(a_coms.bert, sents; filename=(ismissing(result_dir) ? missing : joinpath(result_dir, "$(subreddit)_$(topic)_histogram.csv")))
         (!ismissing(result_dir)) && get_state_evolution(a_coms, interns; write_path=joinpath(result_dir, "$(subreddit)_$(topic)_internal_state.csv"))
 
-        Ws[topic][suffix] = earthmoverdistance(hist.y_obs, hist.y_pred)
+        EMs[topic][suffix] = earthmoverdistance(hist.y_obs, hist.y_pred; width=0.05)
+        Ws[topic][suffix] = wasserstein_distance(a_coms.bert, sents)
         KSs[topic][suffix] = KS_distance(a_coms.bert, sents)
-        hs[topic][suffix] = median(sample_hs)
+        hs[topic][suffix] = sample_hs
         hs[topic]["observed"] = get_observed_homophily(a_coms, a_subs)
         Ns[topic] = (length(unique(a_coms.author)), nrow(a_coms))
         (!isnothing(full_hs)) && (full_hs[topic] = sample_hs)
@@ -536,6 +554,51 @@ function get_state_evolution(comments, internals; q=.25, min_data=16, window=14,
     return ts, q1, ms, q2, obs
 end
 
+function result_df_to_latex(result_df; measures=["KS", "dh", "h_std"], filename=nothing)
+    escape_tex(s) = replace(string(s), "_" => " ")
+
+    topics = collect(unique(result_df.topic))
+    types = collect(unique(result_df.type))
+    nmeas = length(measures)
+    Ncols = 1 + nmeas * length(topics)   # first col for type
+    colspec = "l" * repeat("c", Ncols-1)
+
+    buf = IOBuffer()
+    println(buf, "\\begin{tabular}{" * colspec * "}")
+    # First header row: empty first cell (Type) and topic names spanning nmeas columns
+    header1 = " & " * join([ "\\multicolumn{$(nmeas)}{c}{\\tabhead{" * escape_tex(t) * "}}" for t in topics ], " & ")
+    println(buf, header1 * " \\\\")
+    # Subheader row: 'Type' label and repeated measure names
+    header2 = "\\tabhead{Model} & " * join([ escape_tex(m) for _ in topics for m in measures ], " & ")
+    println(buf, header2 * " \\\\ \\hline")
+    # Data rows: one per model type
+    for ty in types
+        vals = [escape_tex(ty)]
+        for t in topics
+            row = result_df[(result_df.topic .== t) .&& (result_df.type .== ty), :]
+            for m in measures
+                if nrow(row) == 0
+                    push!(vals, "--")
+                else
+                    v = row[1, Symbol(m)]
+                    push!(vals, @sprintf("%.3f", Float64(v)))
+                end
+            end
+        end
+        println(buf, join(vals, " & ") * " \\\\")
+    end
+    println(buf, "\\end{tabular}")
+
+    latex = String(take!(buf))
+    if !isnothing(filename)
+        open(filename, "w") do io
+            write(io, latex)
+        end
+    end
+
+    return latex
+end
+
 isdir(SIEBC_DIR) || mkpath(SIEBC_DIR)
 
 for subreddit in subreddits
@@ -546,6 +609,7 @@ for subreddit in subreddits
     result_df.topic = vcat([fill(topic, length(types)) for topic in topics]...)
     result_df.type = vcat([types for _ in topics]...)
 
+    EMs = Dict()
     Ws = Dict()
     KSs = Dict()
     hs = Dict()
@@ -553,27 +617,35 @@ for subreddit in subreddits
     Ns = Dict()
 
     for topic in topics
+        EMs[topic] = Dict()
         Ws[topic] = Dict()
         KSs[topic] = Dict()
         hs[topic] = Dict()
+        EMs[topic]["observed"] = 0.
         Ws[topic]["observed"] = 0.
         KSs[topic]["observed"] = 0.
     end
 
-    sample_topics!(comments, submissions, suffix, subreddit, Ws, KSs, hs, Ns, full_hs; optim_init=[.6,.6,.6], optim_samples=50)
+    sample_topics!(comments, submissions, suffix, subreddit, EMs, Ws, KSs, hs, Ns, full_hs; optim_init=[.6,.6,.6], optim_samples=50)
     export_boxplot(full_hs, joinpath(SIEBC_DIR, "$(subreddit)_homophily.csv"))
     create_alpha_table(topics, suffix, joinpath(MCMC_DIR, subreddit), SIEBC_DIR)
 
     suffix="linear"
-    sample_topics!(comments, submissions, suffix, subreddit, Ws, KSs, hs, Ns; result_dir=missing, optim_samples=50)
+    sample_topics!(comments, submissions, suffix, subreddit, EMs, Ws, KSs, hs, Ns; result_dir=missing, optim_samples=50)
 
     suffix="logistic_stateless"
-    sample_topics!(comments, submissions, suffix, subreddit, Ws, KSs, hs, Ns; result_dir=missing, optim_samples=50)
+    sample_topics!(comments, submissions, suffix, subreddit, EMs, Ws, KSs, hs, Ns; result_dir=missing, optim_samples=50)
 
     result_df.nb_authors = [Ns[row.topic][1] for row in eachrow(result_df)]
     result_df.nb_comments = [Ns[row.topic][2] for row in eachrow(result_df)]
     result_df.W = [Ws[row.topic][row.type] for row in eachrow(result_df)]
+    result_df.EM = [EMs[row.topic][row.type] for row in eachrow(result_df)]
     result_df.KS = [KSs[row.topic][row.type] for row in eachrow(result_df)]
-    result_df.h = [hs[row.topic][row.type] for row in eachrow(result_df)]
+    result_df.h_mean = [mean(hs[row.topic][row.type]) for row in eachrow(result_df)]
+    result_df.h_std = [std(hs[row.topic][row.type]) for row in eachrow(result_df)]
+    result_df.h_median = [median(hs[row.topic][row.type]) for row in eachrow(result_df)]
+    result_df.dh = [row.h_mean - hs[row.topic]["observed"] for row in eachrow(result_df)]
     CSV.write(joinpath(SIEBC_DIR, "$(subreddit)_measures.csv"), result_df)
+
+    result_df_to_latex(result_df; filename=joinpath(SIEBC_DIR, "$(subreddit)_measures.tex"))
 end
