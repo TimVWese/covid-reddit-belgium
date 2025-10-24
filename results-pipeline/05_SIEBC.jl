@@ -2,7 +2,6 @@ using JLD2
 using Turing
 using SciMLSensitivity, ReverseDiff
 using Interpolations
-using Printf
 using HypothesisTests
 using Optim
 using Random
@@ -313,7 +312,7 @@ Interpret the data from comments and perform statistical analysis.
 This function processes the comments data, ensuring that all authors have corresponding MCMC chains available.
 It then samples trajectories from these chains and performs statistical analysis to compute diagonalness scores and collect all sampled sentences.
 """
-function interpret_data(comments, data_dir; σ_mult=1., p_val=0.05, N_samples=nothing)
+function interpret_data(comments, data_dir; σ_mult=1., p_val=0.05, N_samples=nothing, width=0.05)
     comments, chains, a2idx = get_comments_and_chains(comments, data_dir)
     type = infer_type(data_dir)
     model_type = occursin("stateless", data_dir) ? :stateless : :internal
@@ -328,12 +327,13 @@ function interpret_data(comments, data_dir; σ_mult=1., p_val=0.05, N_samples=no
     hs = Vector{Float64}(undef, N_samples)
     all_sents = Vector{Float64}(undef, size(comments, 1)*N_samples)
     mean_internal = zeros(Float64, size(comments, 1))
-    mean_diffs = zeros(Float64, (41, 41))
+    n_bins = Int(2 / width)
+    mean_diffs = zeros(Float64, (n_bins, n_bins))
 
     @showprogress for i in 1:N_samples
         random_data = sample_trajectory!(comments, a2idx, selector(chains, i); σ_mult, type, model_type)
         mean_internal += comments.internal
-        D, diff = hist_and_diff(comments.sent, comments.parent_sent, random_data; p_val)
+        _, diff = hist_and_diff(comments.sent, comments.parent_sent, random_data; p_val, width)
 
         hs[i] = diagonalness(diff)
         all_sents[(i-1)*size(comments, 1)+1:i*size(comments, 1)] = comments.sent
@@ -346,7 +346,7 @@ end
 function get_observed_homophily(comments, submissions; p_val=0.05)
     random_data = vcat(comments.bert, submissions.bert)
     rd_f = (n) -> rand(random_data, n)
-    Rd_f = () -> get_random_histogram(comments.bert, rd_f(nrow(comments)))
+    Rd_f = () -> get_unconditional_histogram(comments.bert, rd_f(nrow(comments)))
     D = get_structured_histogram(comments.bert, comments.parent_bert)
     diff = get_2d_diff(D, Rd_f, p_val)
     return diagonalness(diff)
@@ -382,13 +382,9 @@ function KS_distance(a::Vector, b::Vector)
 end
 
 function get_histogram(observed, predicted; filename=missing, width=0.05)
-    to_weights = (data) -> begin
-        hist = fit(Histogram, data, (-1-width/2):width:(1+width/2))
-        return hist.weights ./ (width*sum(hist.weights))
-    end
-    xs = -1:width:1 # midpoints
-    y_obs = to_weights(observed)
-    y_pred = to_weights(predicted)
+    xs = (-1+width/2):width:(1-width/2) # midpoints
+    y_obs = histogram_weights(observed; width)
+    y_pred = histogram_weights(predicted; width)
     df = DataFrame(x=xs, y_obs=y_obs, y_pred=y_pred)
     if !ismissing(filename)
         @info "EM distance for $(split(filename, "/")[end]): $(earthmoverdistance(y_obs, y_pred; width=width))"
@@ -438,7 +434,7 @@ end
 function sample_topics!(
         comments, submissions, suffix, subreddit, EMs, Ws, KSs, hs, Ns, full_hs=nothing; N_samples=nothing,
         topics=topics, threshold=nb_comment_threshold, mcmc_dir=MCMC_DIR, result_dir=SIEBC_DIR,
-        optim_init=[1.,1.,1.], optim_samples=300, optim_options=Optim.Options(iterations=300, show_trace=true),
+        optim_init=[1.,1.,1.], optim_samples=100, optim_options=Optim.Options(iterations=250, show_trace=true),
     )
     sub_coms = comments[comments.subreddit .== subreddit, :]
     sub_subs = submissions[submissions.subreddit .== subreddit, :]
@@ -492,7 +488,12 @@ function create_alpha_table(topics, suffix, mcmc_dir, result_dir; p_val=0.05)
         prop_users = count((α₁s .< α₂s) .&& (pvalue.(test_per_user[topic]) .< p_val)) / length(α₁s)
         full_tests[topic] = MannWhitneyUTest(Float64.(α₁s), Float64.(α₂s))
 
-        @printf output "\\topic{%s} & \\( %0.5f \\pm %0.5f \\) & \\( %0.5f \\pm %0.5f \\) & %0.5f \\\\\n" uppercasefirst(string(topic)) mean(α₁s) std(α₁s) mean(α₂s) std(α₂s) prop_users
+            a1_mean = fmt_digit(mean(α₁s), 5)
+            a1_std = fmt_digit(std(α₁s), 5)
+            a2_mean = fmt_digit(mean(α₂s), 5)
+            a2_std = fmt_digit(std(α₂s), 5)
+            prop_s = fmt_digit(prop_users, 5)
+            @printf output "\\topic{%s} & \\( %s \\pm %s \\) & \\( %s \\pm %s \\) & %s \\\\\n" uppercasefirst(string(topic)) a1_mean a1_std a2_mean a2_std prop_s
     end
     @printf output "\\end{tabular}\n"
     close(output)
@@ -581,7 +582,7 @@ function result_df_to_latex(result_df; measures=["KS", "dh", "h_std"], filename=
                     push!(vals, "--")
                 else
                     v = row[1, Symbol(m)]
-                    push!(vals, @sprintf("%.3f", Float64(v)))
+                    push!(vals, fmt_digit(Float64(v), 3))
                 end
             end
         end
@@ -626,15 +627,15 @@ for subreddit in subreddits
         KSs[topic]["observed"] = 0.
     end
 
-    sample_topics!(comments, submissions, suffix, subreddit, EMs, Ws, KSs, hs, Ns, full_hs; optim_init=[.6,.6,.6], optim_samples=50)
+    sample_topics!(comments, submissions, suffix, subreddit, EMs, Ws, KSs, hs, Ns, full_hs; optim_init=[.6,.6,.6])
     export_boxplot(full_hs, joinpath(SIEBC_DIR, "$(subreddit)_homophily.csv"))
     create_alpha_table(topics, suffix, joinpath(MCMC_DIR, subreddit), SIEBC_DIR)
 
     suffix="linear"
-    sample_topics!(comments, submissions, suffix, subreddit, EMs, Ws, KSs, hs, Ns; result_dir=missing, optim_samples=50)
+    sample_topics!(comments, submissions, suffix, subreddit, EMs, Ws, KSs, hs, Ns; result_dir=missing)
 
     suffix="logistic_stateless"
-    sample_topics!(comments, submissions, suffix, subreddit, EMs, Ws, KSs, hs, Ns; result_dir=missing, optim_samples=50)
+    sample_topics!(comments, submissions, suffix, subreddit, EMs, Ws, KSs, hs, Ns; result_dir=missing)
 
     result_df.nb_authors = [Ns[row.topic][1] for row in eachrow(result_df)]
     result_df.nb_comments = [Ns[row.topic][2] for row in eachrow(result_df)]
@@ -645,6 +646,7 @@ for subreddit in subreddits
     result_df.h_std = [std(hs[row.topic][row.type]) for row in eachrow(result_df)]
     result_df.h_median = [median(hs[row.topic][row.type]) for row in eachrow(result_df)]
     result_df.dh = [row.h_mean - hs[row.topic]["observed"] for row in eachrow(result_df)]
+    result_df.hq = [mean(hs[row.topic][row.type] .>= hs[row.topic]["observed"]) for row in eachrow(result_df)]
     CSV.write(joinpath(SIEBC_DIR, "$(subreddit)_measures.csv"), result_df)
 
     result_df_to_latex(result_df; filename=joinpath(SIEBC_DIR, "$(subreddit)_measures.tex"))

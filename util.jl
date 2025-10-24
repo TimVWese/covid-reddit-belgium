@@ -7,6 +7,7 @@ using Statistics
 using StatsBase
 using Distributions
 using SQLite
+using Printf
 
 global DATA_DIR, RESULT_DIR
 const DATA_DB = joinpath(@__DIR__, "data", "06_belgium.db")
@@ -256,15 +257,19 @@ function mean_sampling(data, n; nb_samples=length(data))
     return [mean(sample(data, n; replace=true)) for _ in 1:nb_samples]
 end
 
-function get_random_histogram(d1, d2; width=0.05)
+function histogram_weights(data; width=0.05)
+    hist = fit(Histogram, data, (-1-width):width:1, closed=:right)
+    ws = hist.weights[2:end]
+    ws[1] += hist.weights[1] # merge last two bins
+    return ws ./ (width*sum(ws))
+end
+
+function get_unconditional_histogram(d1, d2; width=0.05)
     valid = .!ismissing.(d1 + d2) .&& .!isnan.(d1 + d2)
     d1,d2 = Float64.(d1[valid]), Float64.(d2[valid])
-    bins = (-1. - width/2):width:(1. + width/2)
 
-    h1 = fit(Histogram, d1, bins)
-    h2 = fit(Histogram, d2, bins)
-    r1 = h1.weights ./ (width*sum(h1.weights))
-    r2 = h2.weights ./ (width*sum(h2.weights))
+    r1 = histogram_weights(d1; width)
+    r2 = histogram_weights(d2; width)
     R = r1*r2'
 
     return R
@@ -273,11 +278,13 @@ end
 function get_structured_histogram(d1, d2; width=0.05)
     valid = .!ismissing.(d1 + d2) .&& .!isnan.(d1 + d2)
     d1,d2 = Float64.(d1[valid]), Float64.(d2[valid])
-    bins = (-1. - width/2):width:(1. + width/2)
-    HD = fit(Histogram, (d1,d2), (bins, bins))
-    D = HD.weights ./ (width^2 * sum(HD.weights))
-
-    return D
+    bins = (-1. - width):width:1
+    HD = fit(Histogram, (d1,d2), (bins, bins), closed=:right)
+    D = HD.weights[2:end, 2:end]  # remove the extra bin on the left and bottom
+    D[1,:] .+= HD.weights[1, 1:end-1]  # add left extra bin to first column
+    D[:,1] .+= HD.weights[1:end-1, 1]  # add bottom extra bin to first row
+    D[1,1] += HD.weights[1,1]  # add bottom-left extra bin to (1,1)
+    return D / (width^2 * sum(D))
 end
 
 function get_2d_diff(D, R_f; N=50)
@@ -308,7 +315,7 @@ Calculate the structured histogram and the difference between the observed and r
 """
 function hist_and_diff(base_data, observed_data, random_data; width=0.05, p_val=nothing, i=1, os=5)
     rd_func = (n) -> mean_sampling(random_data, i; nb_samples=n)
-    Rd_func = () -> get_random_histogram(base_data, rd_func(size(base_data, 1)); width)
+    Rd_func = () -> get_unconditional_histogram(base_data, rd_func(size(base_data, 1)); width)
     D = get_structured_histogram(base_data, observed_data; width)
     diff =  isnothing(p_val) ? get_2d_diff(D, Rd_func; N=20*os)[1] : get_2d_diff(D, Rd_func, p_val; os)
     return D, diff
@@ -330,13 +337,27 @@ end
 Export a 2D matrix as a list of indices and values.
 """
 function export_as_index_list(D, filename)
-    step = 2. / (size(D, 1) - 1.)
-    xs = -1:step:1
-    ys = -1:step:1
+    step = 2. / size(D, 1)
+    xs = (-1 + step/2):step:(1 - step/2)
+    ys = (-1 + step/2):step:(1 - step/2)
     @assert length(xs) == size(D, 1)
     @assert length(ys) == size(D, 2)
     df = DataFrame(x = [xs[i] for i in axes(D, 1) for j in axes(D, 2)],
                    y = [ys[j] for i in axes(D, 1) for j in axes(D, 2)],
                    z = [D[i,j] for i in axes(D, 1) for j in axes(D, 2)])
     CSV.write(filename, df)
+end
+
+"""
+    fmt(x, ndigits) -> String
+
+Format a number with `ndigits` decimals, then strip trailing zeros and
+a trailing decimal point if needed, to get clean output like:
+0.00125, 0.24472, -0.00631, 1.002, 1
+"""
+function fmt_digit(x, ndigits::Int)
+    s = @sprintf("%.*f", ndigits, x)
+    s = replace(s, r"0+$" => "")         # drop trailing zeros
+    s = replace(s, r"\.$"  => "")        # drop dangling decimal point
+    return s
 end

@@ -206,7 +206,7 @@ function handle_contexts(comments, submissions, topics, signals, n)
     return result
 end
 
-function width_sensitivity(comments, submissions, topics, signals; widths=[0.1, 0.05, 0.025], p_val=0.05, os=50)
+function width_sensitivity(comments, submissions, topics, signals; widths=[0.2, 0.1, 0.05, 0.025, 0.0125], p_val=0.05, os=50, repetitions=5)
     result = DataFrame(widths = widths)
     for (n_topic, s_topic) in topics
         for (n_model, s_model) in signals
@@ -218,15 +218,63 @@ function width_sensitivity(comments, submissions, topics, signals; widths=[0.1, 
             sb = remove_invalid_rows(sb, [n_model])
             random_data = vcat(cb[!,n_model], sb[!,n_model])
             hs = Float64[]
+            times = Float64[]
             for width in widths
-                _, diff = hist_and_diff(cb[!,n_model], cb[!, "parent_$(n_model)"], random_data; width, p_val, os)
-                push!(hs, diagonalness(diff))
+                h = 0.0
+                t = @elapsed begin
+                    for _ in 1:repetitions
+                        _, diff = hist_and_diff(cb[!,n_model], cb[!, "parent_$(n_model)"], random_data; width, p_val, os)
+                        h += diagonalness(diff)
+                    end
+                end
+                push!(times, t / repetitions)
+                push!(hs, h / repetitions)
             end
             result[!, "h_$(n_topic)_$(n_model)"] = hs
             result[!, "dh_$(n_topic)_$(n_model)"] = (hs .- hs[end]) ./ hs[end]
+            first_t = times[1] == 0.0 ? eps() : times[1]
+            result[!, "t_$(n_topic)_$(n_model)"] = times ./ first_t
         end
     end
     return result
+end
+
+function sensitivity_to_latex(df, outfile; digits_w=5, digits_h=5, digits_dh=5, digits_t=5)
+
+    open(outfile, "w") do io
+        println(io, "\\begin{tabular}{lccccccccc}")
+        println(io, "  \\hline")
+        println(io, "  & \\multicolumn{3}{c}{\\topic{Lockdowns}} & " *
+                    "\\multicolumn{3}{c}{\\topic{Masks}} & " *
+                    "\\multicolumn{3}{c}{\\topic{Vaccination}} \\\\")
+        println(io, "  \\( w_H \\) & \\( h|w_H \\) & \\( \\delta h \\) & \\( t|w_H \\) & " *
+                    "\\( h|w_H \\) & \\( \\delta h \\) & \\( t|w_H \\) & " *
+                    "\\( h|w_H \\) & \\( \\delta h \\) & \\( t|w_H \\) \\\\ \\hline")
+
+        # --- Rows ---
+        for r in eachrow(df)
+            w   = fmt_digit(r.widths, digits_w)
+
+            hL  = fmt_digit(r.h_lockdown_bert, digits_h)
+            dL  = fmt_digit(r.dh_lockdown_bert, digits_dh)
+            tL  = fmt_digit(r.t_lockdown_bert, digits_t)
+
+            hM  = fmt_digit(r.h_mask_bert, digits_h)
+            dM  = fmt_digit(r.dh_mask_bert, digits_dh)
+            tM  = fmt_digit(r.t_mask_bert, digits_t)
+
+            hV  = fmt_digit(r.h_vaccin_bert, digits_h)
+            dV  = fmt_digit(r.dh_vaccin_bert, digits_dh)
+            tV  = fmt_digit(r.t_vaccin_bert, digits_t)
+
+            println(io,
+                "  $w & $hL & $dL & $tL & $hM & $dM & $tM & $hV & $dV & $tV \\\\"
+            )
+        end
+
+        println(io, "  \\hline")
+        println(io, "\\end{tabular}")
+    end
 end
 
 isdir(path) || mkdir(path)
@@ -277,9 +325,10 @@ for subreddit in subreddits
     other_info.h_context = hs_context
 
     ## WIDTH SENSITIVITY
-    widths = [0.1, 0.05, 0.025]
+    widths = [0.2, 0.1, 0.05, 0.025, 0.00125]
     ws = width_sensitivity(comments_sub, submissions_sub, topics, signals; widths)
 
     CSV.write(joinpath(path, "$(subreddit)_width_sensitivity.csv"), ws)
+    sensitivity_to_latex(ws, joinpath(path, "$(subreddit)_width_sensitivity.tex"))
     CSV.write(joinpath(path, "$(subreddit)_other_info.csv"), other_info)
 end
