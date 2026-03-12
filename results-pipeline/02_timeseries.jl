@@ -1,5 +1,7 @@
-using Optim
+using GLM
+using Distributions
 using RollingFunctions
+using Printf
 
 include(joinpath(dirname(@__FILE__), "..", "util.jl"))
 comments, submissions = get_comments_and_submissions(; discard=Dict(:author=>[]), date_range=nothing)
@@ -35,8 +37,34 @@ function rolling_per_day(comments; selector=row->true, windowsize=14)
     pd = per_day(comments[[selector(row) for row in eachrow(comments)],:])
     pre_pad = windowsize ÷ 2
     post_pad = (windowsize - 1) ÷ 2
-    pd.total = vcat(fill(0, pre_pad), rollmean(pd.num, windowsize), fill(0, post_pad))
-    return pd[pre_pad:end-post_pad-1, :]
+    if nrow(pd) < windowsize
+        return DataFrame(date=Date[], total=Float64[], std=Float64[], ci_low=Float64[], ci_high=Float64[])
+    end
+
+    idx = (pre_pad + 1):(nrow(pd) - post_pad)
+    means = Float64[]
+    stds = Float64[]
+    ci_lows = Float64[]
+    ci_highs = Float64[]
+
+    for i in idx
+        w = pd.num[(i - pre_pad):(i + post_pad)]
+        m = mean(w)
+        s = std(w)
+        ci = 1.96 * s / sqrt(windowsize)
+        push!(means, m)
+        push!(stds, s)
+        push!(ci_lows, m - ci)
+        push!(ci_highs, m + ci)
+    end
+
+    return DataFrame(
+        date=pd.date[idx],
+        total=means,
+        std=stds,
+        ci_low=ci_lows,
+        ci_high=ci_highs,
+    )
 end
 
 function get_activity(comments, submissions, topic, subreddit; windowsize = 14, start_date=Date(2020, 1, 1), end_date=Date(2022, 12, 31))
@@ -46,40 +74,132 @@ function get_activity(comments, submissions, topic, subreddit; windowsize = 14, 
     activity = DataFrame(date=start_date:Day(1):end_date)
     leftjoin!(activity, comment_act, on=:date, makeunique=true)
     leftjoin!(activity, submission_act, on=:date, makeunique=true)
-    rename!(activity, :total => :nb_coms, :total_1 => :nb_subs)
+    rename!(activity,
+        :total => :nb_coms,
+        :std => :nb_coms_std,
+        :ci_low => :nb_coms_ci_low,
+        :ci_high => :nb_coms_ci_high,
+        :total_1 => :nb_subs,
+        :std_1 => :nb_subs_std,
+        :ci_low_1 => :nb_subs_ci_low,
+        :ci_high_1 => :nb_subs_ci_high,
+    )
     activity.nb_posts = coalesce.(activity.nb_coms, 0.) .+ coalesce.(activity.nb_subs, 0.)
+    activity.nb_posts_std = sqrt.(coalesce.(activity.nb_coms_std, 0.).^2 .+ coalesce.(activity.nb_subs_std, 0.).^2)
+    ci_delta = 1.96 .* activity.nb_posts_std ./ sqrt(windowsize)
+    activity.nb_posts_ci_low = activity.nb_posts .- ci_delta
+    activity.nb_posts_ci_high = activity.nb_posts .+ ci_delta
     return activity
 end
 
-struct PiecewiseLinear
-    knots::Vector{Date}
-    values::Vector{Float64}
-end
-
-function (p::PiecewiseLinear)(x::Date)
-    i = searchsortedlast(p.knots, x)
-    if  i < length(p.knots)
-        return p.values[i] + (p.values[i+1] - p.values[i]) * (x - p.knots[i]).value / (p.knots[i+1] - p.knots[i]).value
-    else
-        return p.values[end]
-    end
-end
-
-function construct_loss(knots, data)
-    return x -> begin
-        pl = PiecewiseLinear(knots, x)
-        sum((pl.(data.date) .- data.nb_posts).^2)
-    end
-end
-
 function get_trend(data, knots; start_date=Date(2020, 1, 1), end_date=Date(2022, 12, 31))
-    drange = max(start_date, minimum(data.date)):min(end_date, maximum(data.date))
+    drange = max(start_date, minimum(data.date)):Day(1):min(end_date, maximum(data.date))
     data = data[ein(data.date, drange), :]
-    knots = [drange[1], knots..., drange[end]]
-    init_vals = [data.nb_posts[findfirst(data.date .== d)] for d in knots]
-    loss = construct_loss(knots, data)
-    result = optimize(loss, init_vals)
-    return DataFrame(date=knots, vals=Optim.minimizer(result))
+
+    t = Float64.([( d - data.date[1]).value for d in data.date])
+    n = length(t)
+
+    # ITS design matrix: intercept + global slope + per-knot level jump and slope change
+    cols = [ones(n), t]
+    for k in knots
+        t_k = Float64((k - data.date[1]).value)
+        D = Float64.(data.date .>= k)
+        push!(cols, D)
+        push!(cols, D .* (t .- t_k))
+    end
+    X = hcat(cols...)
+
+    model = lm(X, data.nb_posts)
+    return DataFrame(date=data.date, vals=X * coef(model))
+end
+
+function get_its_results(data, knots; start_date=Date(2020, 1, 1), end_date=Date(2022, 12, 31))
+    drange = max(start_date, minimum(data.date)):Day(1):min(end_date, maximum(data.date))
+    data = data[ein(data.date, drange), :]
+
+    t = Float64.([(d - data.date[1]).value for d in data.date])
+    n = length(t)
+
+    cols = [ones(n), t]
+    for k in knots
+        t_k = Float64((k - data.date[1]).value)
+        D = Float64.(data.date .>= k)
+        push!(cols, D)
+        push!(cols, D .* (t .- t_k))
+    end
+    X = hcat(cols...)
+
+    model = lm(X, data.nb_posts)
+    β = coef(model)
+    se = stderror(model)
+    dof_r = dof_residual(model)
+    CI = confint(model)
+
+    results = DataFrame(
+        event_idx=Int[],
+        event_date=Date[],
+        baseline_change=Float64[],
+        baseline_change_ci_low=Float64[],
+        baseline_change_ci_high=Float64[],
+        trend_change=Float64[],
+        trend_change_ci_low=Float64[],
+        trend_change_ci_high=Float64[],
+    )
+
+    for (i, k) in enumerate(knots)
+        lvl_idx = 2 * i + 1
+        tr_idx = 2 * i + 2
+
+        lvl = β[lvl_idx]
+        tr = β[tr_idx]
+
+        lvl_CI_l, lvl_CI_u = CI[lvl_idx, :]
+        tr_CI_l, tr_CI_u = CI[tr_idx, :]
+
+        push!(results, (i, k, lvl, lvl_CI_l, lvl_CI_u, tr, tr_CI_l, tr_CI_u))
+    end
+
+    return results
+end
+
+const EVENT_LABELS = Dict(
+    lockdown => ["Lockdown I", "", "Lockdown Antwerp", "", "Lockdown II", "", "Lockdown III", ""],
+    mask => ["General mandate", "End in Flanders", "Broad reintroduction", "General end"],
+    vaccin => ["First trials", "Start campaign", "Start booster", "Healthcare obligation"],
+)
+
+function format_effect_with_ci(effect, ci_low, ci_high)
+    effect_str = @sprintf("%.2f", effect)
+    if !(ci_low <= 0 <= ci_high)
+        effect_str = "\\textbf{$effect_str}"
+    end
+    return "$(effect_str) & [$( @sprintf("%.2f", ci_low)), $( @sprintf("%.2f", ci_high))]"
+end
+
+function write_its_table_latex(its_by_topic, output_path)
+    open(output_path, "w") do io
+        println(io, "\\begin{tabular}{p{.25\\textwidth}lcccc}\\hline")
+        println(io, "\\textbf{Event} & \\textbf{Date} & \\(\\Delta\\beta_0\\) & CI 95\\% & \\(\\Delta\\beta_1\\) & CI 95\\% \\\\\\hline")
+
+        for topic in topics
+            haskey(its_by_topic, topic) || continue
+            df = sort(its_by_topic[topic], :event_date)
+            labels = get(EVENT_LABELS, topic, String[])
+            topic_title = get(TOPIC_TITLES, topic, string(topic))
+
+            println(io, "\\emph{$topic_title} &&&&&\\\\")
+            for i in 1:nrow(df)
+                event_label = i <= length(labels) ? labels[i] : "Event $i"
+                level_txt = format_effect_with_ci(df.baseline_change[i], df.baseline_change_ci_low[i], df.baseline_change_ci_high[i])
+                trend_txt = format_effect_with_ci(df.trend_change[i], df.trend_change_ci_low[i], df.trend_change_ci_high[i])
+
+                println(io, "$(event_label) & $(df.event_date[i]) & $(level_txt) & $(trend_txt) \\\\")
+            end
+            println(io, "\\hline")
+        end
+
+        println(io, "\\end{tabular}")
+    end
 end
 
 function identify_negative_days(comments, topic, subreddit; language="en", sentiment_col=:bert, q=.25, threshold=50)
@@ -118,13 +238,18 @@ isdir(path) || mkdir(path)
 isdir(joinpath(path, "negative-days")) || mkdir(joinpath(path, "negative-days"))
 
 for subreddit in subreddits
+    its_by_topic = Dict{Topic, DataFrame}()
     for topic in topics
         pd = get_activity(comments, submissions, topic, subreddit; start_date, end_date, windowsize)
-        CSV.write(joinpath(path, "$(subreddit)_$(topic).csv"), pd[!,[:date, :nb_posts]])
+        CSV.write(joinpath(path, "$(subreddit)_$(topic).csv"), pd[!,[:date, :nb_posts, :nb_posts_std, :nb_posts_ci_low, :nb_posts_ci_high]])
         trend = get_trend(pd, keydates[topic].date; start_date, end_date)
         CSV.write(joinpath(path, "$(subreddit)_$(topic)_trend.csv"), trend)
+        its_results = get_its_results(pd, keydates[topic].date; start_date, end_date)
+        its_by_topic[topic] = its_results
+        CSV.write(joinpath(path, "$(subreddit)_$(topic)_its.csv"), its_results)
         @info "$(subreddit) $(topic) maximum: $(maximum(pd.nb_posts)) at $(pd.date[argmax(pd.nb_posts)]) ($(maximum(pd.nb_posts) / mean(pd.nb_posts)) x mean)"
     end
+    write_its_table_latex(its_by_topic, joinpath(path, "$(subreddit)_its_table.tex"))
 end
 
 open(joinpath(path, "negative-days", "00_summary.csv"), "w") do f

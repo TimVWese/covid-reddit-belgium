@@ -33,6 +33,12 @@ DATE_RANGE = Date(2020, 1, 1):Day(1):Date(2022, 6, 30)
     notapplicable = 10
 end
 
+const TOPIC_TITLES = Dict(
+    lockdown => "Lockdowns",
+    mask => "Masks",
+    vaccin => "Vaccination",
+)
+
 """
     ein(data, set)
 
