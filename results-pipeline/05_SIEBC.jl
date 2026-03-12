@@ -157,9 +157,10 @@ function process(focal_user, comments; model_type=:internal, type=:logistic, N_s
 
     model = model_type == :stateless ? fit_bc_stateless(Cs, Ps, Rs; type) : fit_bc(Cs, Ps, Rs; type)
     chain = sample(model, NUTS(;adtype=AutoReverseDiff()), MCMCThreads(), N_samples_per, N_parallel_in)
+    plls = pointwise_loglikelihoods(model, chain)
     if !isnothing(save_dir)
         try
-            JLD2.@save joinpath(save_dir, "$(focal_user).jld2") chain
+            JLD2.@save joinpath(save_dir, "$(focal_user).jld2") chain plls
         catch e
             open(joinpath(save_dir, "$(focal_user).err"), "w") do f
                 showerror(f, e)
@@ -221,7 +222,7 @@ function order_chain(chain; model_type=:internal)
     return hcat([Array(chain[sym])[:] for sym in all_syms]...)
 end
 
-function get_comments_and_chains(comments, data_dir)
+function get_comments_chains_plls(comments, data_dir)
     comments = comments[:, [:id, :author, :parent_id, :parent_author, :bert, :parent_bert]]
     authors = unique(comments.author)
     available_authors = [s[1:end-5] for s in readdir(data_dir) if occursin(".jld2", s)]
@@ -230,11 +231,12 @@ function get_comments_and_chains(comments, data_dir)
     a2idx = Dict([author => idx for (idx, author) in enumerate(authors)])
     model_type = occursin("stateless", data_dir) ? :stateless : :internal
     chains = [order_chain(JLD2.load(joinpath(data_dir, "$(author).jld2"))["chain"]; model_type) for author in authors]
+    plls = [JLD2.load(joinpath(data_dir, "$(author).jld2"))["plls"] for author in authors]
 
     comments.sent = Vector{Union{Missing, Float64}}(missing, size(comments, 1))
     comments.parent_sent = Vector{Union{Missing, Float64}}(missing, size(comments, 1))
     comments.internal = Vector{Union{Missing, Float64}}(missing, size(comments, 1))
-    return comments, chains, a2idx
+    return comments, chains, plls, a2idx
 end
 
 function sample_trajectory!(comments, a2idx, chain_samples; σ_mult=1, type=:bell, model_type=:internal)
@@ -288,6 +290,33 @@ function sample_trajectory!(comments, a2idx, chain_samples; σ_mult=1, type=:bel
     return vcat(random_data, comments.sent)
 end
 
+"""
+    pll_dict_to_matrix(pll_dict) -> Matrix{Float64}
+
+Convert the Dict returned by `pointwise_loglikelihoods` into a
+(n_observations × n_samples) matrix expected by `WAIC`.
+
+Keys are sorted by their index so rows are in observation order.
+"""
+function pll_dict_to_matrix(pll_dict::AbstractDict)
+    sorted_keys = sort(collect(keys(pll_dict)),
+                       by = k -> parse(Int, match(r"\[(\d+)\]", k).captures[1]))
+    return reduce(vcat, [vec(pll_dict[k])' for k in sorted_keys])
+end
+
+"""
+    WAIC(pll_matrix::AbstractMatrix)
+
+Compute WAIC from a pointwise log-likelihood matrix of shape
+(n_observations × n_samples).
+"""
+function WAIC(ppls::AbstractMatrix)
+    lppd = sum(log.(mean(exp.(ppls), dims=2)))
+    p_eff = sum(var(ppls, dims=2))
+    return -2 * (lppd - p_eff)
+end
+WAIC(ppls::AbstractDict) = WAIC(pll_dict_to_matrix(ppls))
+
 function infer_type(suffix)
     type = split(suffix, "_")[end]
     type = (type in ("bell", "logistic", "linear", "discrete")) ? Symbol(type) : :bell
@@ -313,7 +342,7 @@ This function processes the comments data, ensuring that all authors have corres
 It then samples trajectories from these chains and performs statistical analysis to compute diagonalness scores and collect all sampled sentences.
 """
 function interpret_data(comments, data_dir; σ_mult=1., p_val=0.05, N_samples=nothing, width=0.05)
-    comments, chains, a2idx = get_comments_and_chains(comments, data_dir)
+    comments, chains, plls, a2idx = get_comments_chains_plls(comments, data_dir)
     type = infer_type(data_dir)
     model_type = occursin("stateless", data_dir) ? :stateless : :internal
 
@@ -340,7 +369,7 @@ function interpret_data(comments, data_dir; σ_mult=1., p_val=0.05, N_samples=no
         mean_diffs .+= diff
     end
 
-    return hs, all_sents, mean_internal / N_samples, mean_diffs / N_samples
+    return hs, all_sents, mean_internal / N_samples, mean_diffs / N_samples, WAIC.(plls)
 end
 
 function get_observed_homophily(comments, submissions; p_val=0.05)
@@ -405,7 +434,7 @@ function construct_sigma_loss(all_comments, all_submissions, mcmc_dir, suffix; t
 
     for topic in topics
         a_coms, _ = get_author_comments(all_comments, all_submissions, topic, threshold)
-        comments[topic], chains, a2idx[topic] = get_comments_and_chains(a_coms, joinpath(mcmc_dir, "$(topic)_$(suffix)"))
+        comments[topic], chains, _, a2idx[topic] = get_comments_chains_plls(a_coms, joinpath(mcmc_dir, "$(topic)_$(suffix)"))
         chain_samples[topic] = [[rand(eachrow(chain)) for chain in chains] for _ in 1:N_samples]
         all_sents[topic] = Vector{Float64}(undef, size(comments[topic], 1)*N_samples)
     end
@@ -432,7 +461,7 @@ function construct_sigma_loss(all_comments, all_submissions, mcmc_dir, suffix; t
 end
 
 function sample_topics!(
-        comments, submissions, suffix, subreddit, EMs, Ws, KSs, hs, Ns, full_hs=nothing; N_samples=nothing,
+        comments, submissions, suffix, subreddit, EMs, Ws, KSs, hs, WAICs, Ns, full_hs=nothing; N_samples=nothing,
         topics=topics, threshold=nb_comment_threshold, mcmc_dir=MCMC_DIR, result_dir=SIEBC_DIR,
         optim_init=[1.,1.,1.], optim_samples=100, optim_options=Optim.Options(iterations=250, show_trace=true),
     )
@@ -448,7 +477,7 @@ function sample_topics!(
         a_coms, a_subs = get_author_comments(sub_coms, sub_subs, topic, nb_comment_threshold)
         @info "Processing $(topic): $(length(unique(a_coms.author))) authors that made $(nrow(a_coms)) comments."
         data_dir = joinpath(subreddit_dir, "$(topic)_$(suffix)")
-        sample_hs, sents, interns, diff = interpret_data(a_coms, data_dir; N_samples, σ_mult= σ_opt.minimizer[t_idx])
+        sample_hs, sents, interns, diff, waics = interpret_data(a_coms, data_dir; N_samples, σ_mult= σ_opt.minimizer[t_idx])
         hist = get_histogram(a_coms.bert, sents; filename=(ismissing(result_dir) ? missing : joinpath(result_dir, "$(subreddit)_$(topic)_histogram.csv")))
         (!ismissing(result_dir)) && get_state_evolution(a_coms, interns; write_path=joinpath(result_dir, "$(subreddit)_$(topic)_internal_state.csv"))
 
@@ -457,6 +486,7 @@ function sample_topics!(
         KSs[topic][suffix] = KS_distance(a_coms.bert, sents)
         hs[topic][suffix] = sample_hs
         hs[topic]["observed"] = get_observed_homophily(a_coms, a_subs)
+        WAICs[topic][suffix] = waics
         Ns[topic] = (length(unique(a_coms.author)), nrow(a_coms))
         (!isnothing(full_hs)) && (full_hs[topic] = sample_hs)
     end
@@ -465,7 +495,7 @@ end
 function create_alpha_table(topics, suffix, mcmc_dir, result_dir; p_val=0.05)
     output = open(joinpath(result_dir, "alpha_table.tex"), "w")
     @printf output "\\begin{tabular}{r|ccc}\n"
-    @printf output "& \\( \\alpha_u \\)    & \\( \\alpha_e \\)    & \\( \\kappa \\)  \\\\\\hline\n"
+    @printf output "& \\( \\alpha_u \\) [90\\%% CI]    & \\( \\alpha_e \\) [90\\%% CI]    & \\( \\kappa \\)  \\\\\\hline\n"
     test_per_user = Dict()
     full_tests = Dict()
     for topic in topics
@@ -489,11 +519,15 @@ function create_alpha_table(topics, suffix, mcmc_dir, result_dir; p_val=0.05)
         full_tests[topic] = MannWhitneyUTest(Float64.(α₁s), Float64.(α₂s))
 
             a1_mean = fmt_digit(mean(α₁s), 5)
-            a1_std = fmt_digit(std(α₁s), 5)
+            a1_std  = fmt_digit(std(α₁s), 5)
+            a1_q5   = fmt_digit(quantile(α₁s, 0.05), 5)
+            a1_q95  = fmt_digit(quantile(α₁s, 0.95), 5)
             a2_mean = fmt_digit(mean(α₂s), 5)
-            a2_std = fmt_digit(std(α₂s), 5)
-            prop_s = fmt_digit(prop_users, 5)
-            @printf output "\\topic{%s} & \\( %s \\pm %s \\) & \\( %s \\pm %s \\) & %s \\\\\n" uppercasefirst(string(topic)) a1_mean a1_std a2_mean a2_std prop_s
+            a2_std  = fmt_digit(std(α₂s), 5)
+            a2_q5   = fmt_digit(quantile(α₂s, 0.05), 5)
+            a2_q95  = fmt_digit(quantile(α₂s, 0.95), 5)
+            prop_s  = fmt_digit(prop_users, 5)
+            @printf output "\\topic{%s} & \\( %s \\pm %s \\, [%s, %s] \\) & \\( %s \\pm %s \\, [%s, %s] \\) & %s \\\\\n" uppercasefirst(string(topic)) a1_mean a1_std a1_q5 a1_q95 a2_mean a2_std a2_q5 a2_q95 prop_s
     end
     @printf output "\\end{tabular}\n"
     close(output)
@@ -555,7 +589,10 @@ function get_state_evolution(comments, internals; q=.25, min_data=16, window=14,
     return ts, q1, ms, q2, obs
 end
 
-function result_df_to_latex(result_df; measures=["KS", "dh", "h_std"], filename=nothing)
+_ci_quantile(v::AbstractVector, p) = length(v) > 1 ? quantile(v, p) : missing
+_ci_quantile(v, p) = missing
+
+function result_df_to_latex(result_df; measures=["KS", "dh", "h_mean", "WAIC_mean"], filename=nothing)
     escape_tex(s) = replace(string(s), "_" => " ")
 
     topics = collect(unique(result_df.topic))
@@ -564,13 +601,17 @@ function result_df_to_latex(result_df; measures=["KS", "dh", "h_std"], filename=
     Ncols = 1 + nmeas * length(topics)   # first col for type
     colspec = "l" * repeat("c", Ncols-1)
 
+    has_ci(m) = Symbol(m * "_q5") in propertynames(result_df) && Symbol(m * "_q95") in propertynames(result_df)
+
     buf = IOBuffer()
     println(buf, "\\begin{tabular}{" * colspec * "}")
     # First header row: empty first cell (Type) and topic names spanning nmeas columns
     header1 = " & " * join([ "\\multicolumn{$(nmeas)}{c}{\\tabhead{" * escape_tex(t) * "}}" for t in topics ], " & ")
     println(buf, header1 * " \\\\")
-    # Subheader row: 'Type' label and repeated measure names
-    header2 = "\\tabhead{Model} & " * join([ escape_tex(m) for _ in topics for m in measures ], " & ")
+    # Subheader row: 'Type' label and repeated measure names (with CI annotation where available)
+    header2 = "\\tabhead{Model} & " * join([
+        has_ci(m) ? escape_tex(m) * " [90\\% CI]" : escape_tex(m)
+        for _ in topics for m in measures ], " & ")
     println(buf, header2 * " \\\\ \\hline")
     # Data rows: one per model type
     for ty in types
@@ -582,7 +623,13 @@ function result_df_to_latex(result_df; measures=["KS", "dh", "h_std"], filename=
                     push!(vals, "--")
                 else
                     v = row[1, Symbol(m)]
-                    push!(vals, fmt_digit(Float64(v), 3))
+                    lo = has_ci(m) ? row[1, Symbol(m * "_q5")] : missing
+                    hi = has_ci(m) ? row[1, Symbol(m * "_q95")] : missing
+                    if !ismissing(lo) && !ismissing(hi)
+                        push!(vals, "$(fmt_digit(Float64(v), 3)) [$(fmt_digit(Float64(lo), 3)), $(fmt_digit(Float64(hi), 3))]")
+                    else
+                        push!(vals, fmt_digit(Float64(v), 3))
+                    end
                 end
             end
         end
@@ -613,6 +660,7 @@ for subreddit in subreddits
     EMs = Dict()
     Ws = Dict()
     KSs = Dict()
+    WAICs = Dict()
     hs = Dict()
     full_hs = Dict()
     Ns = Dict()
@@ -622,31 +670,41 @@ for subreddit in subreddits
         Ws[topic] = Dict()
         KSs[topic] = Dict()
         hs[topic] = Dict()
+        WAICs[topic] = Dict()
         EMs[topic]["observed"] = 0.
         Ws[topic]["observed"] = 0.
         KSs[topic]["observed"] = 0.
+        WAICs[topic]["observed"] = 0.
     end
 
-    sample_topics!(comments, submissions, suffix, subreddit, EMs, Ws, KSs, hs, Ns, full_hs; optim_init=[.6,.6,.6])
+    sample_topics!(comments, submissions, suffix, subreddit, EMs, Ws, KSs, hs, WAICs, Ns, full_hs; optim_init=[.6,.6,.6])
     export_boxplot(full_hs, joinpath(SIEBC_DIR, "$(subreddit)_homophily.csv"))
     create_alpha_table(topics, suffix, joinpath(MCMC_DIR, subreddit), SIEBC_DIR)
 
     suffix="linear"
-    sample_topics!(comments, submissions, suffix, subreddit, EMs, Ws, KSs, hs, Ns; result_dir=missing)
+    sample_topics!(comments, submissions, suffix, subreddit, EMs, Ws, KSs, hs, WAICs, Ns; result_dir=missing)
 
     suffix="logistic_stateless"
-    sample_topics!(comments, submissions, suffix, subreddit, EMs, Ws, KSs, hs, Ns; result_dir=missing)
+    sample_topics!(comments, submissions, suffix, subreddit, EMs, Ws, KSs, hs, WAICs, Ns; result_dir=missing)
 
     result_df.nb_authors = [Ns[row.topic][1] for row in eachrow(result_df)]
     result_df.nb_comments = [Ns[row.topic][2] for row in eachrow(result_df)]
     result_df.W = [Ws[row.topic][row.type] for row in eachrow(result_df)]
     result_df.EM = [EMs[row.topic][row.type] for row in eachrow(result_df)]
     result_df.KS = [KSs[row.topic][row.type] for row in eachrow(result_df)]
-    result_df.h_mean = [mean(hs[row.topic][row.type]) for row in eachrow(result_df)]
-    result_df.h_std = [std(hs[row.topic][row.type]) for row in eachrow(result_df)]
-    result_df.h_median = [median(hs[row.topic][row.type]) for row in eachrow(result_df)]
-    result_df.dh = [row.h_mean - hs[row.topic]["observed"] for row in eachrow(result_df)]
-    result_df.hq = [mean(hs[row.topic][row.type] .>= hs[row.topic]["observed"]) for row in eachrow(result_df)]
+    result_df.WAIC_mean = [mean(WAICs[row.topic][row.type]) for row in eachrow(result_df)]
+    result_df.WAIC_std  = [std(WAICs[row.topic][row.type]) for row in eachrow(result_df)]
+    result_df.WAIC_q5   = [_ci_quantile(WAICs[row.topic][row.type], 0.05) for row in eachrow(result_df)]
+    result_df.WAIC_q95  = [_ci_quantile(WAICs[row.topic][row.type], 0.95) for row in eachrow(result_df)]
+    result_df.h_mean    = [mean(hs[row.topic][row.type]) for row in eachrow(result_df)]
+    result_df.h_std     = [std(hs[row.topic][row.type]) for row in eachrow(result_df)]
+    result_df.h_median  = [median(hs[row.topic][row.type]) for row in eachrow(result_df)]
+    result_df.h_q5      = [_ci_quantile(hs[row.topic][row.type], 0.05) for row in eachrow(result_df)]
+    result_df.h_q95     = [_ci_quantile(hs[row.topic][row.type], 0.95) for row in eachrow(result_df)]
+    result_df.dh        = [row.h_mean - hs[row.topic]["observed"] for row in eachrow(result_df)]
+    result_df.dh_q5     = [ismissing(row.h_q5)  ? missing : row.h_q5  - hs[row.topic]["observed"] for row in eachrow(result_df)]
+    result_df.dh_q95    = [ismissing(row.h_q95) ? missing : row.h_q95 - hs[row.topic]["observed"] for row in eachrow(result_df)]
+    result_df.hq        = [mean(hs[row.topic][row.type] .>= hs[row.topic]["observed"]) for row in eachrow(result_df)]
     CSV.write(joinpath(SIEBC_DIR, "$(subreddit)_measures.csv"), result_df)
 
     result_df_to_latex(result_df; filename=joinpath(SIEBC_DIR, "$(subreddit)_measures.tex"))
