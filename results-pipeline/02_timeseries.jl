@@ -92,31 +92,7 @@ function get_activity(comments, submissions, topic, subreddit; windowsize = 14, 
     return activity
 end
 
-function get_trend(data, knots; start_date=Date(2020, 1, 1), end_date=Date(2022, 12, 31))
-    drange = max(start_date, minimum(data.date)):Day(1):min(end_date, maximum(data.date))
-    data = data[ein(data.date, drange), :]
-
-    t = Float64.([( d - data.date[1]).value for d in data.date])
-    n = length(t)
-
-    # ITS design matrix: intercept + global slope + per-knot level jump and slope change
-    cols = [ones(n), t]
-    for k in knots
-        t_k = Float64((k - data.date[1]).value)
-        D = Float64.(data.date .>= k)
-        push!(cols, D)
-        push!(cols, D .* (t .- t_k))
-    end
-    X = hcat(cols...)
-
-    model = lm(X, data.nb_posts)
-    return DataFrame(date=data.date, vals=X * coef(model))
-end
-
-function get_its_results(data, knots; start_date=Date(2020, 1, 1), end_date=Date(2022, 12, 31))
-    drange = max(start_date, minimum(data.date)):Day(1):min(end_date, maximum(data.date))
-    data = data[ein(data.date, drange), :]
-
+function build_linear_model(data, knots)
     t = Float64.([(d - data.date[1]).value for d in data.date])
     n = length(t)
 
@@ -130,9 +106,22 @@ function get_its_results(data, knots; start_date=Date(2020, 1, 1), end_date=Date
     X = hcat(cols...)
 
     model = lm(X, data.nb_posts)
+    return model
+end
+
+function get_trend(data, knots; start_date=Date(2020, 1, 1), end_date=Date(2022, 12, 31))
+    model = build_linear_model(data, knots; start_date, end_date)
+    drange = max(start_date, minimum(data.date)):Day(1):min(end_date, maximum(data.date))
+    data = data[ein(data.date, drange), :]
+    return DataFrame(date=data.date, vals=X * coef(model))
+end
+
+function get_its_results(data, knots; start_date=Date(2020, 1, 1), end_date=Date(2022, 12, 31))
+    model = build_linear_model(data, knots; start_date, end_date)
+    drange = max(start_date, minimum(data.date)):Day(1):min(end_date, maximum(data.date))
+    data = data[ein(data.date, drange), :]
+    
     β = coef(model)
-    se = stderror(model)
-    dof_r = dof_residual(model)
     CI = confint(model)
 
     results = DataFrame(
