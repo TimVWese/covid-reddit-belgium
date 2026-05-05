@@ -39,6 +39,21 @@ const TOPIC_TITLES = Dict(
     vaccin => "Vaccination",
 )
 
+const KEYDATES = Dict([
+    vaccin => DataFrame([
+        :date=>[Date(2020,3,16),Date(2020, 12, 28), Date(2021, 9, 22), Date(2021, 11, 01)],
+        :label=>["First trials", "Start campaign", "Start booster", "Healthcare obligation"],
+    ]),
+    mask => DataFrame([
+        :date=>[Date(2020,07,09), Date(2021,9,17), Date(2021,11,17), Date(2022,03,04)],
+        :label=>["General mandate", "End in Flanders", "Broad reintroduction", "General end"],
+    ]),
+    lockdown => DataFrame([
+        :date=>[Date(2020, 3, 13),Date(2020, 6, 8),Date(2020,7,29),Date(2020, 08, 26),Date(2020, 10, 19),Date(2021,6,9), Date(2021,11,27), Date(2022,02,18)],
+        :label=>["Lockdown I", "", "Lockdown Antwerp", "", "Lockdown II", "", "Lockdown III", ""],
+    ])
+])
+
 """
     ein(data, set)
 

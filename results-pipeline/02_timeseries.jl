@@ -16,18 +16,6 @@ windowsize = 14
 negative_day_thres = 50 # number of posts before a negative day is considered
 negative_day_quantile = 0.275 #quantile to use for negative day detection
 
-keydates = Dict([
-    vaccin => DataFrame([
-        :date=>[Date(2020,3,16),Date(2020, 12, 28), Date(2021, 9, 22), Date(2021, 11, 01)],#, Date(2022, 07, 01)],
-    ]),
-    mask => DataFrame([
-        :date=>[Date(2020,07,09), Date(2021,9,17), Date(2021,11,17), Date(2022,03,04)],
-    ]),
-    lockdown => DataFrame([
-        :date=>[Date(2020, 3, 13),Date(2020, 6, 8),Date(2020,7,29),Date(2020, 08, 26),Date(2020, 10, 19),Date(2021,6,9), Date(2021,11,27), Date(2022,02,18)],
-    ])
-])
-
 """
     rolling_per_day(comments; selector=row->true, windowsize=14)
 
@@ -151,12 +139,6 @@ function get_its_results(data, knots; start_date=Date(2020, 1, 1), end_date=Date
     return results
 end
 
-const EVENT_LABELS = Dict(
-    lockdown => ["Lockdown I", "", "Lockdown Antwerp", "", "Lockdown II", "", "Lockdown III", ""],
-    mask => ["General mandate", "End in Flanders", "Broad reintroduction", "General end"],
-    vaccin => ["First trials", "Start campaign", "Start booster", "Healthcare obligation"],
-)
-
 function format_effect_with_ci(effect, ci_low, ci_high)
     effect_str = @sprintf("%.2f", effect)
     if !(ci_low <= 0 <= ci_high)
@@ -173,7 +155,7 @@ function write_its_table_latex(its_by_topic, output_path)
         for topic in topics
             haskey(its_by_topic, topic) || continue
             df = sort(its_by_topic[topic], :event_date)
-            labels = get(EVENT_LABELS, topic, String[])
+            labels = get(KEYDATES, topic, DataFrame(:label => String[])).label
             topic_title = get(TOPIC_TITLES, topic, string(topic))
 
             println(io, "\\emph{$topic_title} &&&&&\\\\")
@@ -231,9 +213,9 @@ for subreddit in subreddits
     for topic in topics
         pd = get_activity(comments, submissions, topic, subreddit; start_date, end_date, windowsize)
         CSV.write(joinpath(path, "$(subreddit)_$(topic).csv"), pd[!,[:date, :nb_posts, :nb_posts_std, :nb_posts_ci_low, :nb_posts_ci_high]])
-        trend = get_trend(pd, keydates[topic].date; start_date, end_date)
+        trend = get_trend(pd, KEYDATES[topic].date; start_date, end_date)
         CSV.write(joinpath(path, "$(subreddit)_$(topic)_trend.csv"), trend)
-        its_results = get_its_results(pd, keydates[topic].date; start_date, end_date)
+        its_results = get_its_results(pd, KEYDATES[topic].date; start_date, end_date)
         its_by_topic[topic] = its_results
         CSV.write(joinpath(path, "$(subreddit)_$(topic)_its.csv"), its_results)
         @info "$(subreddit) $(topic) maximum: $(maximum(pd.nb_posts)) at $(pd.date[argmax(pd.nb_posts)]) ($(maximum(pd.nb_posts) / mean(pd.nb_posts)) x mean)"

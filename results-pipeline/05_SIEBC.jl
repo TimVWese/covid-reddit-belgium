@@ -479,7 +479,12 @@ function sample_topics!(
         data_dir = joinpath(subreddit_dir, "$(topic)_$(suffix)")
         sample_hs, sents, interns, diff, waics = interpret_data(a_coms, data_dir; N_samples, σ_mult= σ_opt.minimizer[t_idx])
         hist = get_histogram(a_coms.bert, sents; filename=(ismissing(result_dir) ? missing : joinpath(result_dir, "$(subreddit)_$(topic)_histogram.csv")))
-        (!ismissing(result_dir)) && get_state_evolution(a_coms, interns; write_path=joinpath(result_dir, "$(subreddit)_$(topic)_internal_state.csv"))
+
+        if !ismissing(result_dir)
+            write_path = joinpath(result_dir, "$(subreddit)_$(topic)_internal_state.csv")
+            periods = KEYDATES[topic].date
+            get_state_evolution(a_coms, interns; write_path, periods)
+        end
 
         EMs[topic][suffix] = earthmoverdistance(hist.y_obs, hist.y_pred; width=0.05)
         Ws[topic][suffix] = wasserstein_distance(a_coms.bert, sents)
@@ -494,40 +499,48 @@ end
 
 function create_alpha_table(topics, suffix, mcmc_dir, result_dir; p_val=0.05)
     output = open(joinpath(result_dir, "alpha_table.tex"), "w")
-    @printf output "\\begin{tabular}{r|ccc}\n"
-    @printf output "& \\( \\alpha_u \\) [90\\%% CI]    & \\( \\alpha_e \\) [90\\%% CI]    & \\( \\kappa \\)  \\\\\\hline\n"
+    @printf output "\\begin{tabular}{r|cccc}\n"
+    @printf output "& \\( \\epsilon \\) [9?\\%% CI]    & \\( \\alpha_u \\) [9?\\%% CI]    & \\( \\alpha_e \\) [9?\\%% CI]    & \\( \\kappa \\)  \\\\\\hline\n"
     test_per_user = Dict()
     full_tests = Dict()
+    ql = p_val / 2
+    qh = 1 - ql
     for topic in topics
         total_true = 0
         total_count = 0
+        ϵs = Float64[]
         α₁s = Float64[]
         α₂s = Float64[]
         topic_dir = joinpath(mcmc_dir, "$(topic)_$(suffix)")
         test_per_user[topic] = []
         for f in readdir(topic_dir)
             chain = JLD2.load(joinpath(topic_dir, f))["chain"]
-            chain = Array(chain[[:α₁, :α₂]])
+            chain = Array(chain[[:α₁, :α₂, :ϵ]])
             total_true += count(chain[:,1] .< chain[:,2])
             total_count += size(chain, 1)
             push!(test_per_user[topic], MannWhitneyUTest(Float64.(chain[:,1]), Float64.(chain[:,2])))
             push!(α₁s, mean(chain[:,1]))
             push!(α₂s, mean(chain[:,2]))
+            push!(ϵs, 2*mean(chain[:,3])) # transfer to original scale, not necessary for α since the difference is already doubled
         end
         prop_samp = total_true / total_count
         prop_users = count((α₁s .< α₂s) .&& (pvalue.(test_per_user[topic]) .< p_val)) / length(α₁s)
         full_tests[topic] = MannWhitneyUTest(Float64.(α₁s), Float64.(α₂s))
 
-            a1_mean = fmt_digit(mean(α₁s), 5)
-            a1_std  = fmt_digit(std(α₁s), 5)
-            a1_q5   = fmt_digit(quantile(α₁s, 0.05), 5)
-            a1_q95  = fmt_digit(quantile(α₁s, 0.95), 5)
-            a2_mean = fmt_digit(mean(α₂s), 5)
-            a2_std  = fmt_digit(std(α₂s), 5)
-            a2_q5   = fmt_digit(quantile(α₂s, 0.05), 5)
-            a2_q95  = fmt_digit(quantile(α₂s, 0.95), 5)
-            prop_s  = fmt_digit(prop_users, 5)
-            @printf output "\\topic{%s} & \\( %s \\pm %s \\, [%s, %s] \\) & \\( %s \\pm %s \\, [%s, %s] \\) & %s \\\\\n" uppercasefirst(string(topic)) a1_mean a1_std a1_q5 a1_q95 a2_mean a2_std a2_q5 a2_q95 prop_s
+        e_mean = fmt_digit(mean(ϵs), 5)
+        e_std = fmt_digit(std(ϵs), 5)
+        e_ql = fmt_digit(quantile(ϵs, ql), 5)
+        e_qh = fmt_digit(quantile(ϵs, qh), 5)
+        a1_mean = fmt_digit(mean(α₁s), 5)
+        a1_std = fmt_digit(std(α₁s), 5)
+        a1_ql = fmt_digit(quantile(α₁s, ql), 5)
+        a1_qh = fmt_digit(quantile(α₁s, qh), 5)
+        a2_mean = fmt_digit(mean(α₂s), 5)
+        a2_std = fmt_digit(std(α₂s), 5)
+        a2_ql = fmt_digit(quantile(α₂s, ql), 5)
+        a2_qh = fmt_digit(quantile(α₂s, qh), 5)
+        prop_s = fmt_digit(prop_users, 5)
+        @printf output "\\topic{%s} & \\( %s \\pm %s \\, [%s, %s] \\) & \\( %s \\pm %s \\, [%s, %s] \\) & \\( %s \\pm %s \\, [%s, %s] \\) & %s \\\\\n" uppercasefirst(string(topic)) e_mean e_std e_ql e_qh a1_mean a1_std a1_ql a1_qh a2_mean a2_std a2_ql a2_qh prop_s
     end
     @printf output "\\end{tabular}\n"
     close(output)
@@ -592,7 +605,7 @@ end
 _ci_quantile(v::AbstractVector, p) = length(v) > 1 ? quantile(v, p) : missing
 _ci_quantile(v, p) = missing
 
-function result_df_to_latex(result_df; measures=["KS", "dh", "h_mean", "WAIC_mean"], filename=nothing)
+function result_df_to_latex(result_df; filename=nothing, measures = Dict("dh" => "\\( \\Delta h \\)", "WAIC_mean" => "\\( WAIC \\)"))
     escape_tex(s) = replace(string(s), "_" => " ")
 
     topics = collect(unique(result_df.topic))
@@ -601,34 +614,32 @@ function result_df_to_latex(result_df; measures=["KS", "dh", "h_mean", "WAIC_mea
     Ncols = 1 + nmeas * length(topics)   # first col for type
     colspec = "l" * repeat("c", Ncols-1)
 
-    has_ci(m) = Symbol(m * "_q5") in propertynames(result_df) && Symbol(m * "_q95") in propertynames(result_df)
+    has_ci(m) = Symbol(m * "_q025") in propertynames(result_df) && Symbol(m * "_q975") in propertynames(result_df)
 
     buf = IOBuffer()
     println(buf, "\\begin{tabular}{" * colspec * "}")
-    # First header row: empty first cell (Type) and topic names spanning nmeas columns
-    header1 = " & " * join([ "\\multicolumn{$(nmeas)}{c}{\\tabhead{" * escape_tex(t) * "}}" for t in topics ], " & ")
+    # First header row: empty first cell and topic names spanning nmeas columns
+    header1 = " & " * join([ "\\multicolumn{$(nmeas)}{c}{\\emph{" * escape_tex(t) * "}}" for t in topics ], " & ")
     println(buf, header1 * " \\\\")
-    # Subheader row: 'Type' label and repeated measure names (with CI annotation where available)
-    header2 = "\\tabhead{Model} & " * join([
-        has_ci(m) ? escape_tex(m) * " [90\\% CI]" : escape_tex(m)
-        for _ in topics for m in measures ], " & ")
+    # Subheader row: 'Model' label and measure names
+    header2 = "\\textbf{Model} & " * join([ms for _ in topics for (_, ms) in measures ], " & ")
     println(buf, header2 * " \\\\ \\hline")
     # Data rows: one per model type
     for ty in types
-        vals = [escape_tex(ty)]
+        vals = [ty]
         for t in topics
             row = result_df[(result_df.topic .== t) .&& (result_df.type .== ty), :]
-            for m in measures
+            for (m, _) in measures
                 if nrow(row) == 0
                     push!(vals, "--")
                 else
                     v = row[1, Symbol(m)]
-                    lo = has_ci(m) ? row[1, Symbol(m * "_q5")] : missing
-                    hi = has_ci(m) ? row[1, Symbol(m * "_q95")] : missing
+                    lo = has_ci(m) ? row[1, Symbol(m * "_q025")] : missing
+                    hi = has_ci(m) ? row[1, Symbol(m * "_q975")] : missing
                     if !ismissing(lo) && !ismissing(hi)
-                        push!(vals, "$(fmt_digit(Float64(v), 3)) [$(fmt_digit(Float64(lo), 3)), $(fmt_digit(Float64(hi), 3))]")
+                        push!(vals, "$(fmt_digit(Float64(v), 6)) [$(fmt_digit(lo, 6)), $(fmt_digit(hi, 6))]")
                     else
-                        push!(vals, fmt_digit(Float64(v), 3))
+                        push!(vals, fmt_digit(Float64(v), 6))
                     end
                 end
             end
@@ -693,18 +704,18 @@ for subreddit in subreddits
     result_df.EM = [EMs[row.topic][row.type] for row in eachrow(result_df)]
     result_df.KS = [KSs[row.topic][row.type] for row in eachrow(result_df)]
     result_df.WAIC_mean = [mean(WAICs[row.topic][row.type]) for row in eachrow(result_df)]
-    result_df.WAIC_std  = [std(WAICs[row.topic][row.type]) for row in eachrow(result_df)]
-    result_df.WAIC_q5   = [_ci_quantile(WAICs[row.topic][row.type], 0.05) for row in eachrow(result_df)]
-    result_df.WAIC_q95  = [_ci_quantile(WAICs[row.topic][row.type], 0.95) for row in eachrow(result_df)]
-    result_df.h_mean    = [mean(hs[row.topic][row.type]) for row in eachrow(result_df)]
-    result_df.h_std     = [std(hs[row.topic][row.type]) for row in eachrow(result_df)]
-    result_df.h_median  = [median(hs[row.topic][row.type]) for row in eachrow(result_df)]
-    result_df.h_q5      = [_ci_quantile(hs[row.topic][row.type], 0.05) for row in eachrow(result_df)]
-    result_df.h_q95     = [_ci_quantile(hs[row.topic][row.type], 0.95) for row in eachrow(result_df)]
-    result_df.dh        = [row.h_mean - hs[row.topic]["observed"] for row in eachrow(result_df)]
-    result_df.dh_q5     = [ismissing(row.h_q5)  ? missing : row.h_q5  - hs[row.topic]["observed"] for row in eachrow(result_df)]
-    result_df.dh_q95    = [ismissing(row.h_q95) ? missing : row.h_q95 - hs[row.topic]["observed"] for row in eachrow(result_df)]
-    result_df.hq        = [mean(hs[row.topic][row.type] .>= hs[row.topic]["observed"]) for row in eachrow(result_df)]
+    result_df.WAIC_std = [std(WAICs[row.topic][row.type]) for row in eachrow(result_df)]
+    result_df.WAIC_q025 = [_ci_quantile(WAICs[row.topic][row.type], 0.025) for row in eachrow(result_df)]
+    result_df.WAIC_q975 = [_ci_quantile(WAICs[row.topic][row.type], 0.975) for row in eachrow(result_df)]
+    result_df.h_mean = [mean(hs[row.topic][row.type]) for row in eachrow(result_df)]
+    result_df.h_std = [std(hs[row.topic][row.type]) for row in eachrow(result_df)]
+    result_df.h_median = [median(hs[row.topic][row.type]) for row in eachrow(result_df)]
+    result_df.h_q025 = [_ci_quantile(hs[row.topic][row.type], 0.025) for row in eachrow(result_df)]
+    result_df.h_q975 = [_ci_quantile(hs[row.topic][row.type], 0.975) for row in eachrow(result_df)]
+    result_df.dh = [row.h_mean - hs[row.topic]["observed"] for row in eachrow(result_df)]
+    result_df.dh_q025 = [ismissing(row.h_q025) ? missing : row.h_q025  - hs[row.topic]["observed"] for row in eachrow(result_df)]
+    result_df.dh_q975 = [ismissing(row.h_q975) ? missing : row.h_q975 - hs[row.topic]["observed"] for row in eachrow(result_df)]
+    result_df.hq = [mean(hs[row.topic][row.type] .>= hs[row.topic]["observed"]) for row in eachrow(result_df)]
     CSV.write(joinpath(SIEBC_DIR, "$(subreddit)_measures.csv"), result_df)
 
     result_df_to_latex(result_df; filename=joinpath(SIEBC_DIR, "$(subreddit)_measures.tex"))

@@ -5,7 +5,7 @@ comments, submissions = get_comments_and_submissions(; discard=Dict(:author=>[AU
 
 subreddits = ["belgium"]
 topics = [lockdown, mask, vaccin]
-langs = ["en", "nl", "fr"]
+langs = ["en", "nl", "fr", "de"]
 categories = Dict([:topic=>topics,:language=>langs])
 
 path = joinpath(RESULT_DIR, "01_degree_data")

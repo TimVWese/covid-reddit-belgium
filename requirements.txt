@@ -60,6 +60,7 @@ pyarrow==17.0.0
 Pygments==2.18.0
 python-dateutil==2.9.0.post0
 pytz==2024.2
+pymannkendall==1.4.3
 PyYAML==6.0.2
 regex==2024.9.11
 requests==2.32.3
