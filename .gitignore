@@ -5,6 +5,7 @@
 *.npy
 *.log
 *.zst
+__pycache__/
 Manifest.toml
 .venv
 

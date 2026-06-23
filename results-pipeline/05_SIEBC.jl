@@ -21,19 +21,19 @@ nb_comment_threshold = 40
 comments, submissions = get_comments_and_submissions(; discard=Dict(:author=>[AUTHOR_AUTO, AUTHOR_DELETE]), date_range=broad_date_range)
 
 """
-   bc_kernel(; α=0.5, ϵ=0.1, type::Symbol=:logistic, truncated=true)
+    bc_kernel(; α=0.5, ϵ=0.1, γ=50, type::Symbol=:logistic)
 
-Return a function that performs a bounded confidence update between two values, `xb` and `xsig`.
+Return a function `(xb, xsig)` that performs a bounded-confidence update of `xb` towards `xsig`.
 
 # Arguments
-- `α::Float=0.5`: The weight of `xb` in the update.
-- `ϵ::Float=0.1`: The difference resulting in maximal effect
-- `γ::Float=50`: Controls the shape of the curve, in case of `type=:logistic`.
-- `type::Bool=:bell`: The type of update to perform:
-    - `:linear`: Linear update without bounded confidence effects.
+- `α=0.5`: The weight given to the signal `xsig` in the update.
+- `ϵ=0.1`: The difference at which the bounded-confidence effect kicks in.
+- `γ=50`: Controls the steepness of the curve when `type=:logistic`.
+- `type::Symbol=:logistic`: The type of update:
+    - `:linear`: Linear update without bounded-confidence effects.
     - `:discrete`: Discrete update, the classical model.
-    - `:bell`: Bell-shaped update, smooth approximation by derivate of bell curve.
-    - `:logistic`: Logistic update, smooth approximation by logistic curve.
+    - `:bell`: Bell-shaped smooth approximation (derivative of a bell curve).
+    - `:logistic`: Logistic smooth approximation.
 """
 function bc_kernel(; α=0.5, ϵ=0.1, γ=50, type::Symbol=:logistic)
     if type == :linear
@@ -108,24 +108,16 @@ end
 end
 
 """
-    get_author_comments(comments, submissions, topic; threshold=50, extended=false)
+    get_author_comments(comments, submissions, topic, threshold)
 
-Get the comments on `topic` from authors who made at least `threshold` valid comments on said topic.
-A valid comment has a valid bert sentiment value and a parent comment with a valid bert sentiment value.
-Only the comments that are made and replied to by such authors are returned.
-If `extended` is `false`, both the parent and the reply have to be on `topic`; otherwise,
-the reply can be on any topic.
-
-# Arguments
-- `comments`: DataFrame containing comment data.
-- `submissions`: DataFrame containing submission data.
-- `topic`: The topic to filter comments by.
-- `threshold`: Minimum number of comments an author must have to be included (default is 50).
-- `extended`: Boolean flag to determine if all English comments should be considered for parent values (default is false).
+Get the English comments on `topic` from authors who made at least `threshold` valid
+comments on it. A valid comment has a bert sentiment value and a parent (comment or
+submission) with a bert sentiment value. Only comments whose author and parent author
+both clear the threshold are returned.
 
 # Returns
-- `author_comments`: DataFrame of comments from authors who meet the criteria.
-- `author_submissions`: DataFrame of submissions associated with the filtered comments.
+- `author_comments`: comments from authors who meet the criteria.
+- `author_submissions`: submissions associated with those comments.
 """
 function get_author_comments(comments, submissions, topic, threshold)
     sort!(comments, :datetime)

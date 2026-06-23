@@ -137,20 +137,7 @@ function (lookup::ParentLookup)(row::DataFrameRow; full=true)
     return full ? df[id_to_idx[id], :] : id_to_idx[id]
 end
 
-is_comment = row::DataFrameRow -> "body" in names(row)
 is_submission = row::DataFrameRow -> "title" in names(row)
-
-function get_all_cols(categories; prefixes=["ns", "nc"])
-    cols = []
-    for (_, options) in categories
-        for option in options
-            for prefix in prefixes
-                push!(cols, Symbol("$(prefix)_$option"))
-            end
-        end
-    end
-    return cols
-end
 
 """
     activity_per_category!(users, comments, submissions, column::Symbol; options=[], user_dict=Dict())
@@ -248,11 +235,12 @@ function per_day(df::DataFrame, ops::Pair...)
 end
 
 """
-    add_parent_value(comments, submissions; all_comments=nothing, cols=BASE_SENTIMENT_COLUMNS)
+    add_parent_values!(to_process, submissions; all_comments=nothing, cols=["bert"])
 
-Add the value in `cols` of the parent comment or submission to the comment row.
+Add the value in `cols` of the parent comment or submission to each row of `to_process`,
+as new `parent_<col>` columns.
 """
-function add_parent_values!(to_process, submissions; all_comments=nothing, cols=BASE_SENTIMENT_COLUMNS)
+function add_parent_values!(to_process, submissions; all_comments=nothing, cols=["bert"])
     all_comments = isnothing(all_comments) ? to_process : all_comments
     get_parent = ParentLookup(all_comments, submissions)
     for col in cols
@@ -269,9 +257,10 @@ function add_parent_values!(to_process, submissions; all_comments=nothing, cols=
 end
 
 """
-    mean_sampling(data, n; multiplier=1)
+    mean_sampling(data, n; nb_samples=length(data))
 
-Sample `n` elements from `data` and calculate the mean. Repeat `multiplier`*length(data) times.
+Draw `nb_samples` bootstrap means, each the mean of `n` elements sampled with
+replacement from `data` (after dropping missing/NaN values).
 """
 function mean_sampling(data, n; nb_samples=length(data))
     data = data[.!ismissing.(data) .&& .! isnan.(data)]

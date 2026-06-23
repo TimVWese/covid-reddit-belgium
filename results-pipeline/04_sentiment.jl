@@ -52,16 +52,13 @@ function get_ancestors(comment::DataFrameRow, parent_lookup::ParentLookup, gener
 end
 
 """
-    add_ancestor_means!(to_process, submissions, generations; all_comments=nothing, cols=BASE_SENTIMENT_COLUMNS)
+    add_ancestor_means!(to_process, submissions, generations; all_comments=nothing, cols=["bert"])
 
-Add the mean of the values in `cols` of the `genrations` ancestors of `to_process`.
+Add the mean of the values in `cols` of the `generations` ancestors of `to_process`.
 """
-function add_ancestor_means!(to_process, submissions, generations; all_comments=nothing, cols=BASE_SENTIMENT_COLUMNS)
+function add_ancestor_means!(to_process, submissions, generations; all_comments=nothing, cols=["bert"])
     all_comments = isnothing(all_comments) ? to_process : all_comments
     get_parent = ParentLookup(all_comments, submissions)
-    if !("depth" in names(to_process))
-        add_depth!(to_process)
-    end
     for col in cols
         to_process[!, "gen_$(generations)_$col"] = Array{Union{Float64,Missing}}(missing, size(to_process, 1))
     end
@@ -76,9 +73,10 @@ function add_ancestor_means!(to_process, submissions, generations; all_comments=
 end
 
 """
-    get_previous_comment(row::DataFrameRow, comments::DataFrame)
+    get_previous_comments_parents(row, comments, parent_lookup, cols, nb=1)
 
-Get the previous comment of the author of `row` in `comments`.
+Get the `nb` most recent comments by `row`'s author (up to `row`'s time) together
+with their parents' `cols` values. Returns `(missing, missing)` if unavailable.
 """
 function get_previous_comments_parents(row::DataFrameRow, comments::DataFrame, parent_lookup::ParentLookup, cols, nb=1)
     author = row.author
@@ -102,11 +100,11 @@ function get_previous_comments_parents(row::DataFrameRow, comments::DataFrame, p
 end
 
 """
-    add_previous_means!(to_process, submissions, number; all_comments=nothing, cols=BASE_SENTIMENT_COLUMNS)
+    add_previous_means!(to_process, submissions, number; all_comments=nothing, cols=["bert"])
 
 Add the mean of the values in `cols` of the previous `number` comments of the author of `to_process`.
 """
-function add_previous_means!(to_process, submissions, number; all_comments=nothing, cols=BASE_SENTIMENT_COLUMNS)
+function add_previous_means!(to_process, submissions, number; all_comments=nothing, cols=["bert"])
     all_comments = isnothing(all_comments) ? to_process : all_comments
     get_parent = ParentLookup(all_comments, submissions)
     for col in cols

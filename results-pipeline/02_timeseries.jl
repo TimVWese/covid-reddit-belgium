@@ -94,21 +94,18 @@ function build_linear_model(data, knots)
     X = hcat(cols...)
 
     model = lm(X, data.nb_posts)
-    return model
+    return model, X
 end
 
 function get_trend(data, knots; start_date=Date(2020, 1, 1), end_date=Date(2022, 12, 31))
-    model = build_linear_model(data, knots; start_date, end_date)
+    model, X = build_linear_model(data, knots)
+    trend = DataFrame(date=data.date, vals=X * coef(model))
     drange = max(start_date, minimum(data.date)):Day(1):min(end_date, maximum(data.date))
-    data = data[ein(data.date, drange), :]
-    return DataFrame(date=data.date, vals=X * coef(model))
+    return trend[ein(trend.date, drange), :]
 end
 
-function get_its_results(data, knots; start_date=Date(2020, 1, 1), end_date=Date(2022, 12, 31))
-    model = build_linear_model(data, knots; start_date, end_date)
-    drange = max(start_date, minimum(data.date)):Day(1):min(end_date, maximum(data.date))
-    data = data[ein(data.date, drange), :]
-    
+function get_its_results(data, knots)
+    model, _ = build_linear_model(data, knots)
     β = coef(model)
     CI = confint(model)
 
@@ -215,7 +212,7 @@ for subreddit in subreddits
         CSV.write(joinpath(path, "$(subreddit)_$(topic).csv"), pd[!,[:date, :nb_posts, :nb_posts_std, :nb_posts_ci_low, :nb_posts_ci_high]])
         trend = get_trend(pd, KEYDATES[topic].date; start_date, end_date)
         CSV.write(joinpath(path, "$(subreddit)_$(topic)_trend.csv"), trend)
-        its_results = get_its_results(pd, KEYDATES[topic].date; start_date, end_date)
+        its_results = get_its_results(pd, KEYDATES[topic].date)
         its_by_topic[topic] = its_results
         CSV.write(joinpath(path, "$(subreddit)_$(topic)_its.csv"), its_results)
         @info "$(subreddit) $(topic) maximum: $(maximum(pd.nb_posts)) at $(pd.date[argmax(pd.nb_posts)]) ($(maximum(pd.nb_posts) / mean(pd.nb_posts)) x mean)"

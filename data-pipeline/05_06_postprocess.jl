@@ -48,8 +48,6 @@ function handle_df!(df::DataFrame)
     discard_short_results!(df)
 
     ("bert_negative" in names(df)) && (df.bert = -1. * df.bert_negative .+ df.bert_positive)
-    ("bert_multi_1" in names(df)) && (df.bert_multi = -1. * df.bert_multi_1 .-.5*df.bert_multi_2 .+ .5*df.bert_multi_4 .+ df.bert_multi_5)
-    ("vader_compound" in names(df)) && rename!(df, :vader_compound => :vader)
 end
 
 """
@@ -72,10 +70,10 @@ function add_depth!(comments::DataFrame)
 end
 
 """
-    cascade_topics!(comments::DataFrame, submissions::DataFrame, model="mbert", threshold=0.5)
+    cascade_topics!(comments::DataFrame, submissions::DataFrame)
 
-Update the topics in `comments`, such that if the topic is not applicable, or the score is below `threshold`,
-the topic is inferred from the parent comment or submission. returns the number of updated topics.
+Update the topics in `comments`: when a comment's topic is missing, `notapplicable`, or
+`other`, inherit the parent comment or submission's topic. Returns the number of updates.
 """
 function cascade_topics!(comments::DataFrame, submissions::DataFrame)
     to_be_replaced = row -> ismissing(row.topic) || row.topic in (notapplicable, other)

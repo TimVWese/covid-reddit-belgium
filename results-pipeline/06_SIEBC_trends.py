@@ -41,7 +41,8 @@ def infer_topic(path):
 
 def build_periods(ts, topic):
 	"""
-	Match get_MK_trends logic in results-pipeline/05_SIEBC.jl.
+	Split the series into [event, next event) segments, padded with the
+	series endpoints, matching the KEYDATES periods used in 05_SIEBC.jl.
 	"""
 	periods = [pd.Timestamp(d) for d, _ in KEYDATES[topic]]
 	if ts.iloc[0] <= periods[0]:
@@ -119,23 +120,17 @@ def process_file(path, alpha):
 	return pd.DataFrame(rows)
 
 def find_input_files(base_dir):
-	patterns = [
-		base_dir / "results" / "05_siebc" / "belgium_*_internal_state.csv",
-		base_dir / "results" / "05_SIEBC" / "belgium_*_internal_state.csv",
-	]
-	files: list[Path] = []
-	for pattern in patterns:
-		files.extend(sorted(pattern.parent.glob(pattern.name)))
-	deduped = sorted(set(files))
-	if not deduped:
-		raise FileNotFoundError("No internal_state files found under results/05_siebc or results/05_SIEBC")
-	return deduped
+	siebc_dir = base_dir / "results" / "05_siebc"
+	files = sorted(siebc_dir.glob("belgium_*_internal_state.csv"))
+	if not files:
+		raise FileNotFoundError(f"No internal_state files found under {siebc_dir}")
+	return files
 
 
 parser = argparse.ArgumentParser(
 	description="Run Hamed-Rao Mann-Kendall test on internal-state median time series by key-event periods."
 )
-parser.add_argument("--base-dir", type=Path, default=Path(__file__).resolve().parent)
+parser.add_argument("--base-dir", type=Path, default=Path(__file__).resolve().parent.parent)
 parser.add_argument("--alpha", type=float, default=0.05)
 parser.add_argument(
 	"--output",
