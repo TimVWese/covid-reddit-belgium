@@ -7,7 +7,6 @@ from transformers import pipeline
 db_path = "data/02_belgium.db"
 output_path = "data/03_topics/"
 
-global DTAI_TOPICS
 DTAI_TOPICS = ["vaccine", "masks", "lockdown", "schools", "quarantine", "closing-horeca", "testing", "curfew", "other-measure", "not-applicable"]
 
 class Classifier:
@@ -118,5 +117,6 @@ def main_structured_topics(db_path, output_path):
     add_transformers_models(db_path, output_path, device=device, tables=tables, start_point=start_point, end_point=end_point)
     return
 
-os.makedirs(output_path, exist_ok=True)
-main_structured_topics(db_path, output_path)
+if __name__ == "__main__":
+    os.makedirs(output_path, exist_ok=True)
+    main_structured_topics(db_path, output_path)

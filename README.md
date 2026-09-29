@@ -9,6 +9,12 @@ End-to-end data and analysis pipeline to build a Reddit dataset about COVID-19 m
 
 The pipeline is a hybrid of Python (data ingest, HF models) and Julia (processing, statistics, MCMC with Turing).
 
+## Citation
+
+If you use this code or results, please cite the accompanying paper or this repository:
+
+Van Wesemael T, Rocha LEC, Alleman TW, Baetens JM. Social contagion in COVID-19 discussions within the Belgian Reddit community: statistical and modeling study. *J Med Internet Res.* 2026;28:e87723. doi:10.2196/87723
+
 
 ## Repo layout
 

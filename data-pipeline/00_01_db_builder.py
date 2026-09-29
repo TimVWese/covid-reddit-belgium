@@ -8,8 +8,6 @@ from tqdm import tqdm
 import os
 import zstandard
 
-global input_dir, database_location, SUBMISSION_COLUMNS, COMMENT_COLUMNS
-
 input_dir = "data/00_zsts"
 database_location = "data/01_belgium.db"
 
@@ -296,5 +294,6 @@ def main_subreddit():
     conn.close()
     return
 
-main_subreddit()
-append_submission_id(database_location)
+if __name__ == "__main__":
+    main_subreddit()
+    append_submission_id(database_location)
